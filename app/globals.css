@@ -83,11 +83,11 @@
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
+    --background: oklch(0.09 0 0);
     --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
+    --card: oklch(0.14 0 0);
     --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
+    --popover: oklch(0.15 0 0);
     --popover-foreground: oklch(0.985 0 0);
     --primary: oklch(0.922 0 0);
     --primary-foreground: oklch(0.205 0 0);
@@ -106,11 +106,11 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
+    --sidebar: oklch(0.11 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-primary: oklch(0.985 0 0);
+    --sidebar-primary-foreground: oklch(0.145 0 0);
+    --sidebar-accent: oklch(0.22 0 0);
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
@@ -129,4 +129,83 @@
   html {
     @apply font-sans;
     }
+}
+
+@layer utilities {
+  .glass {
+    background: linear-gradient(
+      145deg,
+      oklch(1 0 0 / 7%),
+      oklch(1 0 0 / 2%)
+    );
+    border: 1px solid oklch(1 0 0 / 10%);
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 8%),
+      0 20px 40px -24px oklch(0 0 0 / 80%);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+  }
+  .glass-strong {
+    background: linear-gradient(
+      145deg,
+      oklch(1 0 0 / 12%),
+      oklch(1 0 0 / 4%)
+    );
+    border: 1px solid oklch(1 0 0 / 14%);
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 12%),
+      0 30px 60px -30px oklch(0 0 0 / 90%);
+    backdrop-filter: blur(24px) saturate(150%);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
+  }
+  .bg-grid {
+    background-image:
+      linear-gradient(oklch(1 0 0 / 4%) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(1 0 0 / 4%) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse at 50% 0%, black 30%, transparent 75%);
+    -webkit-mask-image: radial-gradient(
+      ellipse at 50% 0%,
+      black 30%,
+      transparent 75%
+    );
+  }
+  .bg-glow {
+    background: radial-gradient(
+      ellipse 60% 50% at 50% 0%,
+      oklch(1 0 0 / 14%),
+      transparent 70%
+    );
+  }
+  .text-gradient {
+    background: linear-gradient(180deg, oklch(1 0 0), oklch(1 0 0 / 55%));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes float-slow {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.8);
+  }
 }
