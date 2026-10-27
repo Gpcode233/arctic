@@ -29,20 +29,20 @@ const rules: { value: ReleaseRule; label: string; hint: string }[] = [
 ]
 
 const walletPrompt: Partial<Record<string, string>> = {
-  approve: "1/2 · Approve USDC in your wallet…",
-  create: "2/2 · Confirm the deal in your wallet…",
+  approve: "Approve USDC in wallet…",
+  create: "Confirm deal in wallet…",
 }
 
 const waitingJokes = [
   "Confirming your deal…",
-  "Teaching the blockchain to count to six decimals…",
-  "Bribing the validators with good vibes…",
-  "Tucking your USDC into escrow…",
-  "Polishing the smart contract…",
-  "Almost there, no refunds on patience…",
+  "Counting very carefully…",
+  "Tucking USDC away…",
+  "Polishing the contract…",
+  "Asking validators nicely…",
+  "Almost there, promise…",
 ]
 
-function useRotatingText(lines: string[], active: boolean, ms = 2500) {
+function useRotatingText(lines: string[], active: boolean, ms = 4500) {
   const [i, setI] = React.useState(0)
   React.useEffect(() => {
     if (!active) return

@@ -303,12 +303,14 @@ export function useCreateDeal() {
       const totalRaw = parseUnits(String(totalWhole), USDC_DECIMALS)
 
       // Step 1: approve USDC (skipped when existing allowance already covers the deal)
-      const allowance = await client.readContract({
-        address: USDC_ADDRESS as Address,
-        abi: erc20Abi,
-        functionName: "allowance",
-        args: [address, escrow],
-      })
+      const allowance = await client
+        .readContract({
+          address: USDC_ADDRESS as Address,
+          abi: erc20Abi,
+          functionName: "allowance",
+          args: [address, escrow],
+        })
+        .catch(() => 0n) // RPC hiccup: fall back to approving
       if (allowance < totalRaw) {
         setStep("approve")
         const approveTx = await writeContractAsync({
@@ -336,18 +338,34 @@ export function useCreateDeal() {
         : [{ recipient: input.payee.address as Address, bps: 10000 }]
 
       // Step 3: createDeal
+      const createArgs = [
+        input.payee.address as Address,
+        input.title,
+        milestonesIn,
+        effectiveSplits,
+        input.earnYield ?? false,
+      ] as const
+
+      // Simulate first so a revert surfaces as a readable error, not a silent wallet failure
+      try {
+        await client.simulateContract({
+          account: address,
+          address: escrow,
+          abi: ESCROW_ABI,
+          functionName: "createDeal",
+          args: createArgs,
+        })
+      } catch (err) {
+        const e = err as { shortMessage?: string; message?: string }
+        throw new Error(e.shortMessage ?? e.message ?? "createDeal would revert")
+      }
+
       setStep("create")
       const createTx = await writeContractAsync({
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "createDeal",
-        args: [
-          input.payee.address as Address,
-          input.title,
-          milestonesIn,
-          effectiveSplits,
-          input.earnYield ?? false,
-        ],
+        args: createArgs,
       })
       setTxHash(createTx)
 
