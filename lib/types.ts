@@ -1,23 +1,23 @@
 export type DealStatus = "funded" | "in_progress" | "completed"
 
-export type MilestoneStatus = "pending" | "submitted" | "released"
+export type MilestoneStatus = "pending" | "submitted" | "released" | "refunded"
 
 export type ReleaseRule = "approval" | "schedule"
 
 export type Party = {
-  name: string
+  name?: string   // optional: not stored onchain, derived from address
   address: string
 }
 
 export type Milestone = {
-  id: string
-  title: string
-  amount: number
+  id: string         // "{dealId}-{index}"
+  title: string      // from DealCreated event (emitted; not stored onchain)
+  amount: number     // USDC whole units
   rule: ReleaseRule
   status: MilestoneStatus
-  dueAt?: string
+  dueAt?: string     // ISO string for schedule milestones
   releasedAt?: string
-  txHash?: string
+  txHash?: string    // release/refund tx hash from events
 }
 
 export type SplitShare = {
@@ -28,19 +28,23 @@ export type SplitShare = {
 
 export type Deal = {
   id: string
-  title: string
+  title: string      // from DealCreated event
+  payer: Party
   payee: Party
-  total: number
+  total: number      // USDC whole units
   released: number
   status: DealStatus
-  createdAt: string
+  createdAt: string  // ISO
   milestones: Milestone[]
   splits: SplitShare[]
+  earnYield: boolean
+  yieldEarned?: number  // pending yield in USDC from pendingYield view
+  feeBps: number
 }
 
 export type ActivityEvent = {
   id: string
-  kind: "released" | "created" | "split"
+  kind: "released" | "created" | "split" | "yield"
   dealId: string
   label: string
   amount?: number

@@ -15,6 +15,7 @@ const icons: Record<ActivityEvent["kind"], IconSvgElement> = {
   released: CheckmarkCircle02Icon,
   created: PlusSignIcon,
   split: UserGroupIcon,
+  yield: CheckmarkCircle02Icon,
 }
 
 export function ActivityFeed({ events }: { events: ActivityEvent[] }) {

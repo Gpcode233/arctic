@@ -12,9 +12,10 @@ import { Icon } from "@/components/arctic/icon"
 import { PageHeader } from "@/components/arctic/page-header"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { useDeals } from "@/lib/deals-store"
+import { useCreateDeal } from "@/lib/deals-store"
 import { usdc } from "@/lib/format"
 import { isAddress, protocolFeeBps } from "@/lib/config"
+import { YIELD_ENABLED } from "@/lib/arc"
 import type { ReleaseRule } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -30,7 +31,7 @@ const label = "text-xs font-medium text-muted-foreground"
 
 export default function NewDealPage() {
   const router = useRouter()
-  const { createDeal } = useDeals()
+  const { createDeal, isPending } = useCreateDeal()
 
   const [title, setTitle] = React.useState("")
   const [payeeName, setPayeeName] = React.useState("")
@@ -39,6 +40,7 @@ export default function NewDealPage() {
     { title: "", amount: "", rule: "approval", dueAt: "" },
   ])
   const [splits, setSplits] = React.useState<SplitDraft[]>([])
+  const [earnYield, setEarnYield] = React.useState(false)
 
   const total = milestones.reduce((sum, m) => sum + (Number(m.amount) || 0), 0)
   const fee = (total * protocolFeeBps) / 10_000
@@ -48,8 +50,8 @@ export default function NewDealPage() {
     (splitTotal === 100 && splits.every((s) => isAddress(s.address.trim())))
 
   const valid =
+    !isPending &&
     title.trim() &&
-    payeeName.trim() &&
     isAddress(payeeAddress.trim()) &&
     total > 0 &&
     milestones.every((m) => m.title.trim() && Number(m.amount) > 0) &&
@@ -63,34 +65,41 @@ export default function NewDealPage() {
     setSplits((prev) => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
   }
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!valid) return
 
     const address = payeeAddress.trim()
-    const deal = createDeal({
-      title: title.trim(),
-      payee: { name: payeeName.trim(), address },
-      milestones: milestones.map((m) => ({
-        title: m.title.trim(),
-        amount: Number(m.amount),
-        rule: m.rule,
-        dueAt: m.rule === "schedule" && m.dueAt ? new Date(m.dueAt).toISOString() : undefined,
-      })),
-      splits:
-        splits.length > 0
-          ? splits.map((s) => ({
-              recipient: s.recipient.trim() || "Recipient",
-              address: s.address.trim(),
-              bps: Math.round(Number(s.pct) * 100),
-            }))
-          : [{ recipient: payeeName.trim(), address, bps: 10000 }],
-    })
+    try {
+      const { dealId, txHash } = await createDeal({
+        title: title.trim(),
+        payee: { name: payeeName.trim() || undefined, address },
+        milestones: milestones.map((m) => ({
+          title: m.title.trim(),
+          amount: Number(m.amount),
+          rule: m.rule,
+          dueAt: m.rule === "schedule" && m.dueAt ? new Date(m.dueAt).toISOString() : undefined,
+        })),
+        splits:
+          splits.length > 0
+            ? splits.map((s) => ({
+                recipient: s.recipient.trim() || s.address.trim(),
+                address: s.address.trim(),
+                bps: Math.round(Number(s.pct) * 100),
+              }))
+            : [],
+        earnYield: earnYield && YIELD_ENABLED,
+      })
 
-    toast.success("Deal created", {
-      description: `$${usdc(total, 2)} USDC for ${deal.title}`,
-    })
-    router.push(`/deals/${deal.id}`)
+      toast.success("Deal created", {
+        description: `$${usdc(total, 2)} USDC locked onchain`,
+      })
+      void txHash  // logged; not shown in URL
+      router.push(`/deals/${String(dealId)}`)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      toast.error("Transaction failed", { description: msg.slice(0, 120) })
+    }
   }
 
   return (
@@ -111,11 +120,12 @@ export default function NewDealPage() {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="What is this deal for?"
+                maxLength={80}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <label className={label} htmlFor="payee">Payee name</label>
+                <label className={label} htmlFor="payee">Payee name (optional)</label>
                 <Input
                   id="payee"
                   value={payeeName}
@@ -148,6 +158,7 @@ export default function NewDealPage() {
                     { title: "", amount: "", rule: "approval", dueAt: "" },
                   ])
                 }
+                disabled={milestones.length >= 20}
               >
                 <Icon icon={PlusSignIcon} size={14} /> Add
               </Button>
@@ -160,6 +171,7 @@ export default function NewDealPage() {
                     value={m.title}
                     onChange={(e) => updateMilestone(i, { title: e.target.value })}
                     placeholder={`Milestone ${i + 1}`}
+                    maxLength={80}
                   />
                   <div className="relative w-36 shrink-0">
                     <span className="absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground">$</span>
@@ -228,6 +240,7 @@ export default function NewDealPage() {
                 onClick={() =>
                   setSplits((prev) => [...prev, { recipient: "", address: "", pct: "" }])
                 }
+                disabled={splits.length >= 10}
               >
                 <Icon icon={PlusSignIcon} size={14} /> Add
               </Button>
@@ -282,6 +295,31 @@ export default function NewDealPage() {
             <Row label="Escrow total" value={`$${usdc(total, 2)}`} />
             <Row label={`Protocol fee (${protocolFeeBps / 100}%)`} value={`$${usdc(fee, 2)}`} />
           </dl>
+          {YIELD_ENABLED && (
+            <div className="flex items-center justify-between rounded-xl border border-border px-4 py-3 text-sm">
+              <div>
+                <p className="font-medium">Earn yield</p>
+                <p className="text-xs text-muted-foreground">Auto-deposit into vault</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={earnYield}
+                onClick={() => setEarnYield((v) => !v)}
+                className={cn(
+                  "relative h-5 w-9 cursor-pointer rounded-full transition-colors",
+                  earnYield ? "bg-foreground" : "bg-foreground/20",
+                )}
+              >
+                <span
+                  className={cn(
+                    "absolute top-0.5 left-0.5 size-4 rounded-full bg-background transition-transform",
+                    earnYield ? "translate-x-4" : "translate-x-0",
+                  )}
+                />
+              </button>
+            </div>
+          )}
           <div className="border-t border-border pt-4">
             <div className="flex items-baseline justify-between">
               <span className="text-sm text-muted-foreground">You deposit</span>
@@ -289,8 +327,8 @@ export default function NewDealPage() {
             </div>
             <p className="mt-1 text-xs text-muted-foreground">USDC · settled on Arc</p>
           </div>
-          <Button type="submit" size="lg" className="w-full" disabled={!valid}>
-            Fund escrow
+          <Button type="submit" size="lg" className="w-full" disabled={!valid || isPending}>
+            {isPending ? "Confirm in wallet…" : "Fund escrow"}
           </Button>
         </aside>
       </div>

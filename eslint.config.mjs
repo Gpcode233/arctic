@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Solidity library source — not part of the Next.js app
+    "lib/openzeppelin-contracts/**",
+    "lib/forge-std/**",
+    "contracts/**",
+    "scripts/self-deploy.ts",
   ]),
 ]);
 

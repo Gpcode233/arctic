@@ -17,7 +17,11 @@ export function shortDate(iso: string) {
   })
 }
 
-export const EXPLORER_URL = "https://explorer.arc.io"
+import { EXPLORER_URL as _EXPLORER_URL, explorerTx as _explorerTx, explorerAddr as _explorerAddr } from "@/lib/arc"
+
+export const EXPLORER_URL = _EXPLORER_URL
+export const explorerTx = _explorerTx
+export const explorerAddr = _explorerAddr
 
 export function shortDateTime(iso: string) {
   return new Date(iso).toLocaleString("en-US", {
