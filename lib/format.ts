@@ -23,6 +23,16 @@ export const EXPLORER_URL = _EXPLORER_URL
 export const explorerTx = _explorerTx
 export const explorerAddr = _explorerAddr
 
+/** Date and time in the viewer's local timezone (scheduled releases). */
+export function localDateTime(iso: string) {
+  return new Date(iso).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })
+}
+
 export function shortDateTime(iso: string) {
   return new Date(iso).toLocaleString("en-US", {
     month: "short",

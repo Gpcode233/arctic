@@ -23,9 +23,17 @@ export function saveShare(dealId: string, recipients: ShareRecipient[]) {
   }
 }
 
-export function loadShare(dealId: string): ShareRecipient[] {
+/** Raw stored value (a stable string, so it works as a useSyncExternalStore snapshot). */
+export function readShareRaw(dealId: string): string {
   try {
-    const raw = localStorage.getItem(key(dealId))
+    return localStorage.getItem(key(dealId)) ?? ""
+  } catch {
+    return ""
+  }
+}
+
+export function parseShare(raw: string): ShareRecipient[] {
+  try {
     return raw ? (JSON.parse(raw) as ShareRecipient[]) : []
   } catch {
     return []

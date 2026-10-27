@@ -17,6 +17,13 @@ import { useCreateDeal } from "@/lib/deals-store"
 import { explorerTx, usdc } from "@/lib/format"
 import { isAddress, protocolFeeBps } from "@/lib/config"
 import { isEmail, saveShare, type ShareRecipient } from "@/lib/share"
+import {
+  buildVesting,
+  frequencyAllowed,
+  releaseCount,
+  type VestingDuration,
+  type VestingFrequency,
+} from "@/lib/vesting"
 import { YIELD_ENABLED } from "@/lib/arc"
 import type { ReleaseRule } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -30,7 +37,7 @@ const rules: { value: ReleaseRule; label: string; hint: string }[] = [
 ]
 
 const walletPrompt: Partial<Record<string, string>> = {
-  approve: "Approve USDC in wallet…",
+  approve: "Approve USDC (no funds move)…",
   create: "Confirm deal in wallet…",
 }
 
@@ -47,9 +54,11 @@ function useRotatingText(lines: string[], active: boolean, ms = 4500) {
   const [i, setI] = React.useState(0)
   React.useEffect(() => {
     if (!active) return
-    setI(0)
     const t = setInterval(() => setI((n) => (n + 1) % lines.length), ms)
-    return () => clearInterval(t)
+    return () => {
+      clearInterval(t)
+      setI(0)
+    }
   }, [active, lines.length, ms])
   return lines[i]
 }
@@ -67,6 +76,9 @@ function FundLabel({ step, isPending }: { step: string; isPending: boolean }) {
   )
 }
 
+// Scheduled releases must be in the future; the contract reverts InvalidReleaseTime otherwise.
+const scheduleOk = (dueAt: string) => !!dueAt && new Date(dueAt).getTime() > Date.now() + 60_000
+
 const label = "text-xs font-medium text-muted-foreground"
 
 export default function NewDealPage() {
@@ -81,6 +93,9 @@ export default function NewDealPage() {
     { title: "", amount: "", rule: "approval", dueAt: "" },
   ])
   const [splits, setSplits] = React.useState<SplitDraft[]>([])
+  const [vestTotal, setVestTotal] = React.useState("")
+  const [vestMonths, setVestMonths] = React.useState<VestingDuration>(12)
+  const [vestFreq, setVestFreq] = React.useState<VestingFrequency>("monthly")
   const [earnYield, setEarnYield] = React.useState(false)
 
   const total = milestones.reduce((sum, m) => sum + (Number(m.amount) || 0), 0)
@@ -100,8 +115,27 @@ export default function NewDealPage() {
     isAddress(payeeAddress.trim()) &&
     total > 0 &&
     milestones.every((m) => m.title.trim() && Number(m.amount) > 0) &&
+    milestones.every((m) => m.rule !== "schedule" || scheduleOk(m.dueAt)) &&
     splitOk &&
     emailsOk
+
+  const vestTotalNum = Number(vestTotal) || 0
+  const vestCount = releaseCount(vestMonths, vestFreq)
+
+  function chooseDuration(months: VestingDuration) {
+    setVestMonths(months)
+    // Monthly would exceed the contract's 20-milestone cap for 24/36 months
+    if (!frequencyAllowed(months, vestFreq)) setVestFreq("quarterly")
+  }
+
+  function applyVesting() {
+    if (vestTotalNum <= 0) return
+    const rows = buildVesting(vestTotalNum, vestMonths, vestFreq, new Date())
+    setMilestones(rows.map((r) => ({ ...r, rule: "schedule" as const })))
+    toast.success("Vesting schedule applied", {
+      description: `${rows.length} releases over ${vestMonths} months. Edit anything below.`,
+    })
+  }
 
   function updateMilestone(i: number, patch: Partial<MilestoneDraft>) {
     setMilestones((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
@@ -220,6 +254,86 @@ export default function NewDealPage() {
           </section>
 
           <section className="glass space-y-4 rounded-2xl p-6">
+            <div>
+              <h2 className="font-medium">Vesting template</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Optional. Fill equal scheduled releases for team vesting or retainers.
+              </p>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-1.5">
+                <label className={label} htmlFor="vest-total">Total to vest</label>
+                <div className="relative">
+                  <span className="absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                  <Input
+                    id="vest-total"
+                    value={vestTotal}
+                    inputMode="decimal"
+                    onChange={(e) => setVestTotal(e.target.value.replace(/[^0-9.]/g, ""))}
+                    placeholder="0"
+                    className="tabular pl-6"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <span className={label}>Duration</span>
+                <div className="flex gap-2">
+                  {([12, 24, 36] as VestingDuration[]).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => chooseDuration(m)}
+                      className={cn(
+                        "rounded-md px-2.5 py-1.5 text-xs transition-colors",
+                        vestMonths === m
+                          ? "bg-foreground text-background"
+                          : "bg-foreground/5 text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {m} months
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <span className={label}>Release every</span>
+                <div className="flex gap-2">
+                  {(["monthly", "quarterly"] as VestingFrequency[]).map((f) => {
+                    const ok = frequencyAllowed(vestMonths, f)
+                    return (
+                      <button
+                        key={f}
+                        type="button"
+                        disabled={!ok}
+                        title={ok ? undefined : "Over the 20-milestone limit per deal"}
+                        onClick={() => setVestFreq(f)}
+                        className={cn(
+                          "rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                          vestFreq === f
+                            ? "bg-foreground text-background"
+                            : "bg-foreground/5 text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {f === "monthly" ? "Month" : "Quarter"}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                {vestTotalNum > 0
+                  ? `${vestCount} releases of about $${usdc(vestTotalNum / vestCount, 2)}, first one in ${vestFreq === "monthly" ? "1 month" : "3 months"}. Max 20 per deal.`
+                  : "Enter a total to preview. Max 20 releases per deal."}
+              </p>
+              <Button type="button" size="sm" variant="outline" disabled={vestTotalNum <= 0} onClick={applyVesting}>
+                Apply schedule
+              </Button>
+            </div>
+          </section>
+
+          <section className="glass space-y-4 rounded-2xl p-6">
             <div className="flex items-center justify-between">
               <h2 className="font-medium">Milestones</h2>
               <Button
@@ -288,10 +402,11 @@ export default function NewDealPage() {
                   ))}
                   {m.rule === "schedule" && (
                     <Input
-                      type="date"
+                      type="datetime-local"
                       value={m.dueAt}
                       onChange={(e) => updateMilestone(i, { dueAt: e.target.value })}
-                      className="h-8 w-40"
+                      aria-invalid={!!m.dueAt && !scheduleOk(m.dueAt)}
+                      className="h-8 w-52"
                     />
                   )}
                 </div>

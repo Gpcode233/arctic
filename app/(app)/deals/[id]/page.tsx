@@ -25,8 +25,9 @@ import {
   useRefundMilestone,
 } from "@/lib/deals-store"
 import { CONTRACT_ADDRESS } from "@/lib/arc"
-import { dealUrl, loadShare, mailtoFor, type ShareRecipient } from "@/lib/share"
-import { explorerAddr, explorerTx, shortAddress, shortDate, usdc } from "@/lib/format"
+import { formatCountdown, useChainNow } from "@/lib/chain-time"
+import { dealUrl, mailtoFor, parseShare, readShareRaw } from "@/lib/share"
+import { explorerAddr, explorerTx, localDateTime, shortAddress, shortDate, usdc } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
 const ruleLabels = {
@@ -37,6 +38,7 @@ const ruleLabels = {
 export default function DealPage() {
   const { id } = useParams<{ id: string }>()
   const { address } = useAccount()
+  const chainNow = useChainNow()
 
   const dealId = BigInt(id ?? "0")
   const { deal, isLoading, refetch } = useDealById(id ? dealId : undefined)
@@ -71,7 +73,12 @@ export default function DealPage() {
     )
   }
 
-  const locked = deal.total - deal.released
+  // Refunded milestones are no longer held, so sum what is still open when milestones are loaded.
+  const locked = deal.milestones.length
+    ? deal.milestones
+        .filter((m) => m.status !== "released" && m.status !== "refunded")
+        .reduce((sum, m) => sum + m.amount, 0)
+    : deal.total - deal.released
   const pct = deal.total > 0 ? Math.round((deal.released / deal.total) * 100) : 0
 
   async function handleDeliver(index: number, title: string) {
@@ -156,7 +163,7 @@ export default function DealPage() {
         <div className="grid gap-6 sm:grid-cols-3">
           <Figure label="Total escrowed" value={`$${usdc(deal.total, 0)}`} />
           <Figure label="Released" value={`$${usdc(deal.released, 0)}`} />
-          <Figure label="Still locked" value={`$${usdc(locked, 0)}`} />
+          <Figure label="Held in escrow" value={`$${usdc(locked, 0)}`} />
         </div>
         {deal.yieldEarned !== undefined && deal.yieldEarned > 0 && (
           <p className="mt-2 text-xs text-muted-foreground">
@@ -182,9 +189,12 @@ export default function DealPage() {
               {deal.milestones.map((m, i) => {
                 const last = i === deal.milestones.length - 1
                 const done = m.status === "released" || m.status === "refunded"
+                const dueMs = m.dueAt ? Date.parse(m.dueAt) : undefined
+                const msLeft = dueMs !== undefined ? dueMs - chainNow : undefined
+                const scheduleReady = msLeft !== undefined && msLeft <= 0
                 const canRelease =
                   (isPayer && m.rule === "approval" && m.status === "submitted") ||
-                  (m.rule === "schedule" && m.status !== "released" && m.status !== "refunded" && !!m.dueAt && new Date(m.dueAt) <= new Date())
+                  (m.rule === "schedule" && !done && scheduleReady)
                 const canDeliver = isPayee && m.rule === "approval" && m.status === "pending"
                 const canRefund =
                   !done &&
@@ -219,7 +229,7 @@ export default function DealPage() {
                           <p className="font-medium">{m.title}</p>
                           <p className="text-xs text-muted-foreground">
                             {ruleLabels[m.rule]}
-                            {m.dueAt ? ` · due ${shortDate(m.dueAt)}` : ""}
+                            {m.dueAt ? ` · due ${localDateTime(m.dueAt)}` : ""}
                             {m.releasedAt ? ` · released ${shortDate(m.releasedAt)}` : ""}
                           </p>
                         </div>
@@ -228,6 +238,11 @@ export default function DealPage() {
 
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <StatusBadge status={m.status} />
+                        {m.rule === "schedule" && !done && msLeft !== undefined && (
+                          <span className="tabular text-xs text-muted-foreground">
+                            {scheduleReady ? "Ready to release" : `Releases in ${formatCountdown(msLeft)}`}
+                          </span>
+                        )}
                         {canDeliver && (
                           <Button
                             size="sm"
@@ -320,8 +335,13 @@ export default function DealPage() {
 }
 
 function ShareCard({ dealId, title }: { dealId: string; title: string }) {
-  const [recipients, setRecipients] = React.useState<ShareRecipient[]>([])
-  React.useEffect(() => setRecipients(loadShare(dealId)), [dealId])
+  // Stored per browser; empty on the server so hydration matches.
+  const raw = React.useSyncExternalStore(
+    () => () => {},
+    () => readShareRaw(dealId),
+    () => "",
+  )
+  const recipients = React.useMemo(() => parseShare(raw), [raw])
 
   return (
     <section className="glass rounded-2xl p-6">
