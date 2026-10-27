@@ -14,14 +14,15 @@ import { PageHeader } from "@/components/arctic/page-header"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useCreateDeal } from "@/lib/deals-store"
-import { usdc } from "@/lib/format"
+import { explorerTx, usdc } from "@/lib/format"
 import { isAddress, protocolFeeBps } from "@/lib/config"
+import { isEmail, saveShare, type ShareRecipient } from "@/lib/share"
 import { YIELD_ENABLED } from "@/lib/arc"
 import type { ReleaseRule } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 type MilestoneDraft = { title: string; amount: string; rule: ReleaseRule; dueAt: string }
-type SplitDraft = { recipient: string; address: string; pct: string }
+type SplitDraft = { recipient: string; email: string; address: string; pct: string }
 
 const rules: { value: ReleaseRule; label: string; hint: string }[] = [
   { value: "approval", label: "Approval", hint: "Payer releases" },
@@ -74,6 +75,7 @@ export default function NewDealPage() {
 
   const [title, setTitle] = React.useState("")
   const [payeeName, setPayeeName] = React.useState("")
+  const [payeeEmail, setPayeeEmail] = React.useState("")
   const [payeeAddress, setPayeeAddress] = React.useState("")
   const [milestones, setMilestones] = React.useState<MilestoneDraft[]>([
     { title: "", amount: "", rule: "approval", dueAt: "" },
@@ -88,13 +90,18 @@ export default function NewDealPage() {
     splits.length === 0 ||
     (splitTotal === 100 && splits.every((s) => isAddress(s.address.trim())))
 
+  const emailsOk =
+    (!payeeEmail.trim() || isEmail(payeeEmail.trim())) &&
+    splits.every((s) => !s.email.trim() || isEmail(s.email.trim()))
+
   const valid =
     !isPending &&
     title.trim() &&
     isAddress(payeeAddress.trim()) &&
     total > 0 &&
     milestones.every((m) => m.title.trim() && Number(m.amount) > 0) &&
-    splitOk
+    splitOk &&
+    emailsOk
 
   function updateMilestone(i: number, patch: Partial<MilestoneDraft>) {
     setMilestones((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
@@ -132,8 +139,22 @@ export default function NewDealPage() {
 
       toast.success("Deal created", {
         description: `$${usdc(total, 2)} USDC locked onchain`,
+        action: { label: "View on explorer", onClick: () => window.open(explorerTx(txHash), "_blank") },
       })
-      void txHash  // logged; not shown in URL
+      const recipients: ShareRecipient[] = [
+        ...(payeeEmail.trim()
+          ? [{ name: payeeName.trim() || undefined, email: payeeEmail.trim(), role: "Payee" as const, address }]
+          : []),
+        ...splits
+          .filter((s) => s.email.trim())
+          .map((s) => ({
+            name: s.recipient.trim() || undefined,
+            email: s.email.trim(),
+            role: "Split recipient" as const,
+            address: s.address.trim(),
+          })),
+      ]
+      saveShare(String(dealId), recipients)
       router.push(`/deals/${String(dealId)}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -173,15 +194,29 @@ export default function NewDealPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <label className={label} htmlFor="address">Payee wallet</label>
+                <label className={label} htmlFor="payee-email">Payee email (optional)</label>
                 <Input
-                  id="address"
-                  value={payeeAddress}
-                  onChange={(e) => setPayeeAddress(e.target.value)}
-                  placeholder="0x…"
+                  id="payee-email"
+                  type="email"
+                  value={payeeEmail}
+                  onChange={(e) => setPayeeEmail(e.target.value)}
+                  placeholder="name@example.com"
+                  aria-invalid={!!payeeEmail.trim() && !isEmail(payeeEmail.trim())}
                 />
               </div>
             </div>
+            <div className="space-y-1.5">
+              <label className={label} htmlFor="address">Payee wallet</label>
+              <Input
+                id="address"
+                value={payeeAddress}
+                onChange={(e) => setPayeeAddress(e.target.value)}
+                placeholder="0x…"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Emails stay in this browser. After funding you get a ready-to-send email link.
+            </p>
           </section>
 
           <section className="glass space-y-4 rounded-2xl p-6">
@@ -277,7 +312,7 @@ export default function NewDealPage() {
                 size="sm"
                 variant="outline"
                 onClick={() =>
-                  setSplits((prev) => [...prev, { recipient: "", address: "", pct: "" }])
+                  setSplits((prev) => [...prev, { recipient: "", email: "", address: "", pct: "" }])
                 }
                 disabled={splits.length >= 10}
               >
@@ -286,36 +321,47 @@ export default function NewDealPage() {
             </div>
 
             {splits.map((s, i) => (
-              <div key={i} className="flex gap-3">
-                <Input
-                  value={s.recipient}
-                  onChange={(e) => updateSplit(i, { recipient: e.target.value })}
-                  placeholder="Name"
-                />
-                <Input
-                  value={s.address}
-                  onChange={(e) => updateSplit(i, { address: e.target.value })}
-                  placeholder="0x…"
-                />
-                <div className="relative w-24 shrink-0">
+              <div key={i} className="space-y-3 rounded-xl border border-border bg-foreground/2 p-4">
+                <div className="flex gap-3">
                   <Input
-                    value={s.pct}
-                    inputMode="decimal"
-                    onChange={(e) => updateSplit(i, { pct: e.target.value.replace(/[^0-9.]/g, "") })}
-                    placeholder="0"
-                    className="tabular pr-7"
+                    value={s.recipient}
+                    onChange={(e) => updateSplit(i, { recipient: e.target.value })}
+                    placeholder="Name"
                   />
-                  <span className="absolute top-1/2 right-3 -translate-y-1/2 text-sm text-muted-foreground">%</span>
+                  <Input
+                    type="email"
+                    value={s.email}
+                    onChange={(e) => updateSplit(i, { email: e.target.value })}
+                    placeholder="Email (optional)"
+                    aria-invalid={!!s.email.trim() && !isEmail(s.email.trim())}
+                  />
                 </div>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  aria-label="Remove recipient"
-                  onClick={() => setSplits((prev) => prev.filter((_, idx) => idx !== i))}
-                >
-                  <Icon icon={Cancel01Icon} size={14} />
-                </Button>
+                <div className="flex gap-3">
+                  <Input
+                    value={s.address}
+                    onChange={(e) => updateSplit(i, { address: e.target.value })}
+                    placeholder="0x…"
+                  />
+                  <div className="relative w-24 shrink-0">
+                    <Input
+                      value={s.pct}
+                      inputMode="decimal"
+                      onChange={(e) => updateSplit(i, { pct: e.target.value.replace(/[^0-9.]/g, "") })}
+                      placeholder="0"
+                      className="tabular pr-7"
+                    />
+                    <span className="absolute top-1/2 right-3 -translate-y-1/2 text-sm text-muted-foreground">%</span>
+                  </div>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    aria-label="Remove recipient"
+                    onClick={() => setSplits((prev) => prev.filter((_, idx) => idx !== i))}
+                  >
+                    <Icon icon={Cancel01Icon} size={14} />
+                  </Button>
+                </div>
               </div>
             ))}
 

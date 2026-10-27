@@ -1,11 +1,13 @@
 "use client"
 
+import * as React from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
 import {
   ArrowLeft01Icon,
   ArrowUpRight01Icon,
   CheckmarkCircle02Icon,
+  Mail01Icon,
   Clock01Icon,
   Copy01Icon,
   UserIcon,
@@ -22,7 +24,9 @@ import {
   useReleaseMilestone,
   useRefundMilestone,
 } from "@/lib/deals-store"
-import { explorerTx, shortAddress, shortDate, usdc } from "@/lib/format"
+import { CONTRACT_ADDRESS } from "@/lib/arc"
+import { dealUrl, loadShare, mailtoFor, type ShareRecipient } from "@/lib/share"
+import { explorerAddr, explorerTx, shortAddress, shortDate, usdc } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
 const ruleLabels = {
@@ -127,6 +131,14 @@ export default function DealPage() {
             )}
           </p>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+        {CONTRACT_ADDRESS && (
+          <Button variant="outline" asChild>
+            <a href={explorerAddr(CONTRACT_ADDRESS)} target="_blank" rel="noreferrer">
+              View on explorer <Icon icon={ArrowUpRight01Icon} size={14} />
+            </a>
+          </Button>
+        )}
         <Button
           variant="outline"
           onClick={() => {
@@ -137,6 +149,7 @@ export default function DealPage() {
           <Icon icon={Copy01Icon} />
           #{id}
         </Button>
+        </div>
       </div>
 
       <section className="glass-strong rounded-2xl p-6">
@@ -244,6 +257,16 @@ export default function DealPage() {
                             {pendingRefund ? "Confirming…" : "Refund"}
                           </Button>
                         )}
+                        {m.rule === "approval" && m.status === "pending" && isPayer && (
+                          <span className="text-xs text-muted-foreground">
+                            Waiting for the payee to mark this delivered, then you can release.
+                          </span>
+                        )}
+                        {m.rule === "approval" && m.status === "submitted" && isPayee && (
+                          <span className="text-xs text-muted-foreground">
+                            Delivered. Waiting for the payer to release.
+                          </span>
+                        )}
                         {m.txHash && (
                           <a
                             href={explorerTx(m.txHash)}
@@ -290,7 +313,55 @@ export default function DealPage() {
           </ul>
         </div>
       </section>
+
+      <ShareCard dealId={id} title={deal.title} />
     </>
+  )
+}
+
+function ShareCard({ dealId, title }: { dealId: string; title: string }) {
+  const [recipients, setRecipients] = React.useState<ShareRecipient[]>([])
+  React.useEffect(() => setRecipients(loadShare(dealId)), [dealId])
+
+  return (
+    <section className="glass rounded-2xl p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-medium">Share this deal</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Send the link so the payee can open the deal with their wallet.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          onClick={() => {
+            navigator.clipboard?.writeText(dealUrl(dealId))
+            toast.success("Deal link copied")
+          }}
+        >
+          <Icon icon={Copy01Icon} /> Copy link
+        </Button>
+      </div>
+      {recipients.length > 0 && (
+        <ul className="mt-5 space-y-3">
+          {recipients.map((r) => (
+            <li key={`${r.email}-${r.address}`} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+              <div className="min-w-0">
+                <p className="truncate font-medium">{r.name ?? r.email}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {r.role} · {r.email}
+                </p>
+              </div>
+              <Button size="sm" variant="outline" asChild>
+                <a href={mailtoFor(r, dealId, title)}>
+                  <Icon icon={Mail01Icon} size={14} /> Email link
+                </a>
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 

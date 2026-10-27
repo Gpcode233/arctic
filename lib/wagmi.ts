@@ -20,9 +20,14 @@ export const wagmiConfig = createConfig(
   getDefaultConfig({
     chains: [activeChain],
     transports: {
-      [activeChain.id]: fallback(
-        rpcUrls.map((url) => http(url, { retryCount: 2, retryDelay: 500, timeout: 15_000 })),
-      ),
+      // In the browser, read through the same-origin proxy (some networks block *.arc.io);
+      // direct endpoints stay as fallback and are used during SSR.
+      [activeChain.id]: fallback([
+        ...(typeof window !== "undefined"
+          ? [http("/api/rpc", { retryCount: 1, retryDelay: 300, timeout: 20_000, batch: true })]
+          : []),
+        ...rpcUrls.map((url) => http(url, { retryCount: 2, retryDelay: 500, timeout: 15_000 })),
+      ]),
     },
     walletConnectProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "arctic-escrow",
     enableAaveAccount: false,

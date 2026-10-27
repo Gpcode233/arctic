@@ -372,18 +372,16 @@ export function useCreateDeal() {
       setStep("confirming")
       const receipt = await waitForReceipt(client, createTx)
 
-      // Parse DealCreated event to get dealId from the indexed first topic
-      let dealId = 0n
+      // DealCreated(uint256 indexed dealId, ...) is emitted by the escrow itself;
+      // ignore other contracts' logs (e.g. the USDC Transfer, whose topic[1] is an address).
+      let dealId: bigint | undefined
       for (const log of receipt.logs) {
-        try {
-          // DealCreated: event DealCreated(uint256 indexed dealId, ...)
-          // topic[0] = event selector, topic[1] = dealId (indexed)
-          if (log.topics[1]) {
-            dealId = BigInt(log.topics[1])
-            break
-          }
-        } catch { /* skip */ }
+        if (log.address.toLowerCase() === escrow.toLowerCase() && log.topics[1]) {
+          dealId = BigInt(log.topics[1])
+          break
+        }
       }
+      if (dealId === undefined) throw new Error("Deal created, but its ID was not found in the receipt")
 
       return { dealId, txHash: createTx }
     } finally {
