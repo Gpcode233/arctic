@@ -15,7 +15,6 @@ import {
   useReadContract,
   useReadContracts,
   useWriteContract,
-  useWaitForTransactionReceipt,
   usePublicClient,
 } from "wagmi"
 import { erc20Abi } from "viem"
@@ -35,9 +34,30 @@ import type {
   SplitShare,
 } from "@/lib/types"
 import ESCROW_ABI_JSON from "@/lib/abi/ArcticEscrow.json"
-import type { Abi } from "viem"
+import type { Abi, PublicClient } from "viem"
 // Cast to Abi so wagmi hooks accept it without "string not assignable to 'function'" errors
 const ESCROW_ABI = ESCROW_ABI_JSON as unknown as Abi
+
+
+/**
+ * Poll for a receipt directly. viem's waitForTransactionReceipt times out in the
+ * browser against the Arc RPC even for mined txs, so poll getTransactionReceipt.
+ */
+async function waitForReceipt(client: PublicClient, hash: `0x${string}`, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const receipt = await client.getTransactionReceipt({ hash })
+      if (receipt.status === "reverted") throw new Error("Transaction reverted onchain")
+      return receipt
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("reverted onchain")) throw err
+      // not mined yet (or transient RPC error) - keep polling
+    }
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  throw new Error("Still waiting for confirmation. Check the explorer for the transaction.")
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types for form inputs
@@ -259,6 +279,8 @@ export function useDeals(): {
 // Write hooks
 // ─────────────────────────────────────────────────────────────────────────
 
+export type CreateStep = "idle" | "approve" | "approving" | "create" | "confirming"
+
 /** Approve USDC spend then create deal in one flow. */
 export function useCreateDeal() {
   const { writeContractAsync } = useWriteContract()
@@ -267,9 +289,9 @@ export function useCreateDeal() {
   const escrow = CONTRACT_ADDRESS as Address | undefined
 
   const [isPending, setIsPending] = React.useState(false)
+  const [step, setStep] = React.useState<CreateStep>("idle")
   const [txHash, setTxHash] = React.useState<`0x${string}` | undefined>()
 
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash })
 
   async function createDeal(input: NewDealInput): Promise<{ dealId: bigint; txHash: `0x${string}` }> {
     if (!escrow) throw new Error("Contract not deployed. Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local")
@@ -280,14 +302,24 @@ export function useCreateDeal() {
       const totalWhole = input.milestones.reduce((sum, m) => sum + m.amount, 0)
       const totalRaw = parseUnits(String(totalWhole), USDC_DECIMALS)
 
-      // Step 1: approve USDC
-      const approveTx = await writeContractAsync({
+      // Step 1: approve USDC (skipped when existing allowance already covers the deal)
+      const allowance = await client.readContract({
         address: USDC_ADDRESS as Address,
         abi: erc20Abi,
-        functionName: "approve",
-        args: [escrow, totalRaw],
+        functionName: "allowance",
+        args: [address, escrow],
       })
-      await client.waitForTransactionReceipt({ hash: approveTx })
+      if (allowance < totalRaw) {
+        setStep("approve")
+        const approveTx = await writeContractAsync({
+          address: USDC_ADDRESS as Address,
+          abi: erc20Abi,
+          functionName: "approve",
+          args: [escrow, totalRaw],
+        })
+        setStep("approving")
+        await waitForReceipt(client, approveTx)
+      }
 
       // Step 2: build milestone and split structs
       const milestonesIn = input.milestones.map((m) => ({
@@ -304,6 +336,7 @@ export function useCreateDeal() {
         : [{ recipient: input.payee.address as Address, bps: 10000 }]
 
       // Step 3: createDeal
+      setStep("create")
       const createTx = await writeContractAsync({
         address: escrow,
         abi: ESCROW_ABI,
@@ -318,7 +351,8 @@ export function useCreateDeal() {
       })
       setTxHash(createTx)
 
-      const receipt = await client.waitForTransactionReceipt({ hash: createTx })
+      setStep("confirming")
+      const receipt = await waitForReceipt(client, createTx)
 
       // Parse DealCreated event to get dealId from the indexed first topic
       let dealId = 0n
@@ -336,10 +370,11 @@ export function useCreateDeal() {
       return { dealId, txHash: createTx }
     } finally {
       setIsPending(false)
+      setStep("idle")
     }
   }
 
-  return { createDeal, isPending: isPending || isConfirming, isSuccess, txHash }
+  return { createDeal, isPending, step, txHash }
 }
 
 export function useMarkDelivered(dealId: bigint | undefined) {
@@ -359,7 +394,7 @@ export function useMarkDelivered(dealId: bigint | undefined) {
         functionName: "markDelivered",
         args: [dealId, BigInt(index)],
       })
-      await client!.waitForTransactionReceipt({ hash })
+      await waitForReceipt(client!, hash)
       return hash
     } finally {
       setIsPending(false)
@@ -386,7 +421,7 @@ export function useReleaseMilestone(dealId: bigint | undefined) {
         functionName: "releaseMilestone",
         args: [dealId, BigInt(index)],
       })
-      await client!.waitForTransactionReceipt({ hash })
+      await waitForReceipt(client!, hash)
       return hash
     } finally {
       setIsPending(false)
@@ -413,7 +448,7 @@ export function useRefundMilestone(dealId: bigint | undefined) {
         functionName: "refundMilestone",
         args: [dealId, BigInt(index)],
       })
-      await client!.waitForTransactionReceipt({ hash })
+      await waitForReceipt(client!, hash)
       return hash
     } finally {
       setIsPending(false)

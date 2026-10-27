@@ -4,6 +4,7 @@ import * as React from "react"
 import { useRouter } from "next/navigation"
 import {
   Cancel01Icon,
+  Loading03Icon,
   PlusSignIcon,
 } from "@hugeicons/core-free-icons"
 import { toast } from "sonner"
@@ -27,11 +28,49 @@ const rules: { value: ReleaseRule; label: string; hint: string }[] = [
   { value: "schedule", label: "Schedule", hint: "Releases on a date" },
 ]
 
+const walletPrompt: Partial<Record<string, string>> = {
+  approve: "1/2 · Approve USDC in your wallet…",
+  create: "2/2 · Confirm the deal in your wallet…",
+}
+
+const waitingJokes = [
+  "Confirming your deal…",
+  "Teaching the blockchain to count to six decimals…",
+  "Bribing the validators with good vibes…",
+  "Tucking your USDC into escrow…",
+  "Polishing the smart contract…",
+  "Almost there, no refunds on patience…",
+]
+
+function useRotatingText(lines: string[], active: boolean, ms = 2500) {
+  const [i, setI] = React.useState(0)
+  React.useEffect(() => {
+    if (!active) return
+    setI(0)
+    const t = setInterval(() => setI((n) => (n + 1) % lines.length), ms)
+    return () => clearInterval(t)
+  }, [active, lines.length, ms])
+  return lines[i]
+}
+
+function FundLabel({ step, isPending }: { step: string; isPending: boolean }) {
+  const waiting = step === "approving" || step === "confirming"
+  const joke = useRotatingText(waitingJokes, waiting)
+  if (!isPending) return <>Fund escrow</>
+  const text = waiting ? joke : (walletPrompt[step] ?? "Working…")
+  return (
+    <span className="flex items-center gap-2">
+      <Icon icon={Loading03Icon} className="animate-spin" />
+      <span key={text} className="animate-in fade-in duration-300">{text}</span>
+    </span>
+  )
+}
+
 const label = "text-xs font-medium text-muted-foreground"
 
 export default function NewDealPage() {
   const router = useRouter()
-  const { createDeal, isPending } = useCreateDeal()
+  const { createDeal, isPending, step } = useCreateDeal()
 
   const [title, setTitle] = React.useState("")
   const [payeeName, setPayeeName] = React.useState("")
@@ -328,7 +367,7 @@ export default function NewDealPage() {
             <p className="mt-1 text-xs text-muted-foreground">USDC · settled on Arc</p>
           </div>
           <Button type="submit" size="lg" className="w-full" disabled={!valid || isPending}>
-            {isPending ? "Confirm in wallet…" : "Fund escrow"}
+            <FundLabel step={step} isPending={isPending} />
           </Button>
         </aside>
       </div>
