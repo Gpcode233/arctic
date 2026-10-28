@@ -76,8 +76,9 @@ function FundLabel({ step, isPending }: { step: string; isPending: boolean }) {
   )
 }
 
-// Scheduled releases must be in the future; the contract reverts InvalidReleaseTime otherwise.
-const scheduleOk = (dueAt: string) => !!dueAt && new Date(dueAt).getTime() > Date.now() + 60_000
+// Scheduled releases must be at least 5 minutes in the future to survive wallet confirmation lag.
+const SCHEDULE_BUFFER_MS = 5 * 60 * 1_000
+const scheduleOk = (dueAt: string) => !!dueAt && new Date(dueAt).getTime() > Date.now() + SCHEDULE_BUFFER_MS
 
 const label = "text-xs font-medium text-muted-foreground"
 
@@ -401,13 +402,20 @@ export default function NewDealPage() {
                     </button>
                   ))}
                   {m.rule === "schedule" && (
-                    <Input
-                      type="datetime-local"
-                      value={m.dueAt}
-                      onChange={(e) => updateMilestone(i, { dueAt: e.target.value })}
-                      aria-invalid={!!m.dueAt && !scheduleOk(m.dueAt)}
-                      className="h-8 w-52"
-                    />
+                    <div className="flex flex-col gap-1">
+                      <Input
+                        type="datetime-local"
+                        value={m.dueAt}
+                        onChange={(e) => updateMilestone(i, { dueAt: e.target.value })}
+                        aria-invalid={!!m.dueAt && !scheduleOk(m.dueAt)}
+                        className="h-8 w-52"
+                      />
+                      {m.dueAt && !scheduleOk(m.dueAt) && (
+                        <p className="text-xs text-destructive">
+                          Must be at least 5 min from now to confirm onchain
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

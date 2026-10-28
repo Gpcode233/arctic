@@ -324,14 +324,27 @@ export function useCreateDeal() {
       }
 
       // Step 2: build milestone and split structs
-      const milestonesIn = input.milestones.map((m) => ({
-        title: m.title,
-        amount: parseUnits(String(m.amount), USDC_DECIMALS),
-        rule: m.rule === "schedule" ? 1 : 0,
-        releaseTime: m.rule === "schedule" && m.dueAt
-          ? BigInt(Math.floor(new Date(m.dueAt).getTime() / 1000))
-          : 0n,
-      }))
+      const nowSec = Math.floor(Date.now() / 1000)
+      const milestonesIn = input.milestones.map((m, i) => {
+        let releaseTime = 0n
+        if (m.rule === "schedule" && m.dueAt) {
+          const ts = Math.floor(new Date(m.dueAt).getTime() / 1000)
+          // Guard: contract rejects releaseTime <= block.timestamp; add 5 min buffer
+          if (ts <= nowSec + 300) {
+            throw new Error(
+              `Milestone ${i + 1} release time must be at least 5 minutes in the future. ` +
+              `Please set a later date and try again.`
+            )
+          }
+          releaseTime = BigInt(ts)
+        }
+        return {
+          title: m.title,
+          amount: parseUnits(String(m.amount), USDC_DECIMALS),
+          rule: m.rule === "schedule" ? 1 : 0,
+          releaseTime,
+        }
+      })
 
       const effectiveSplits = input.splits.length > 0
         ? input.splits.map((s) => ({ recipient: s.address as Address, bps: s.bps }))
