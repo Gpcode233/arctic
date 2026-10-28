@@ -19,9 +19,15 @@ import { StatCard } from "@/components/arctic/stat-card"
 import { Button } from "@/components/ui/button"
 import { useDeals } from "@/lib/deals-store"
 import { usdc } from "@/lib/format"
+import { useProfile } from "@/lib/profile-store"
 
 export default function DashboardPage() {
   const { deals, activity } = useDeals()
+  const { profile } = useProfile()
+
+  const greeting = profile
+    ? `Welcome back, ${profile.displayName}`
+    : "Dashboard"
 
   const volume = deals.reduce((sum, d) => sum + d.total, 0)
   const released = deals.reduce((sum, d) => sum + d.released, 0)
@@ -39,7 +45,7 @@ export default function DashboardPage() {
   return (
     <>
       <PageHeader
-        title="Dashboard"
+        title={greeting}
         description="Everything locked and released across your escrows."
         actions={newDeal}
       />
