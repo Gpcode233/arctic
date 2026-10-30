@@ -19,7 +19,7 @@ import { Icon } from "@/components/arctic/icon"
 import { StatusBadge } from "@/components/arctic/status-badge"
 import { Button } from "@/components/ui/button"
 import { useDealActions, useDealById, useOwed, useWithdraw } from "@/lib/deals-store"
-import { CONTRACT_ADDRESS } from "@/lib/arc"
+import { getContractAddress } from "@/lib/arc"
 import { formatCountdown, useChainNow } from "@/lib/chain-time"
 import { dealUrl, mailtoFor, parseShare, readShareRaw } from "@/lib/share"
 import { explorerAddr, explorerTx, localDateTime, shortAddress, shortDate, usdc } from "@/lib/format"
@@ -44,7 +44,8 @@ const same = (a: string | undefined, b: string | undefined) => !!a && !!b && a.t
 
 export default function DealPage() {
   const { id } = useParams<{ id: string }>()
-  const { address } = useAccount()
+  const { address, chainId } = useAccount()
+  const contractAddress = getContractAddress(chainId)
   const chainNow = useChainNow()
 
   const dealId = BigInt(id ?? "0")
@@ -58,7 +59,7 @@ export default function DealPage() {
       const hash = await fn()
       toast.success(label, {
         description,
-        action: { label: "Explorer", onClick: () => window.open(explorerTx(hash), "_blank") },
+        action: { label: "Explorer", onClick: () => window.open(explorerTx(hash, chainId), "_blank") },
       })
       refetch()
       refetchOwed()
@@ -127,9 +128,9 @@ export default function DealPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {CONTRACT_ADDRESS && (
+          {contractAddress && (
             <Button variant="outline" asChild>
-              <a href={explorerAddr(CONTRACT_ADDRESS)} target="_blank" rel="noreferrer">
+              <a href={explorerAddr(contractAddress, chainId)} target="_blank" rel="noreferrer">
                 View on explorer <Icon icon={ArrowUpRight01Icon} size={14} />
               </a>
             </Button>

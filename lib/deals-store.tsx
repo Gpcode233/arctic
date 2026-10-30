@@ -17,7 +17,7 @@ import {
 import { erc20Abi } from "viem"
 
 import {
-  CONTRACT_ADDRESS,
+  getContractAddress,
   USDC_ADDRESS,
   USDC_DECIMALS,
 } from "@/lib/arc"
@@ -147,7 +147,8 @@ export function useDealById(dealId: bigint | undefined): {
   isLoading: boolean
   refetch: () => void
 } {
-  const escrow = CONTRACT_ADDRESS as Address | undefined
+  const { chainId } = useAccount()
+  const escrow = getContractAddress(chainId) as Address | undefined
   const enabled = !!escrow && dealId !== undefined
 
   const { data: dealRaw, isLoading: l1, refetch: r1 } = useReadContract({
@@ -222,8 +223,8 @@ export function useDeals(): {
   isLoading: boolean
   refetch: () => void
 } {
-  const { address } = useAccount()
-  const escrow = CONTRACT_ADDRESS as Address | undefined
+  const { address, chainId } = useAccount()
+  const escrow = getContractAddress(chainId) as Address | undefined
 
   const { data: counts, refetch: rc } = useReadContracts({
     contracts: escrow && address
@@ -295,8 +296,8 @@ export function useDeals(): {
 
 /** USDC credited to the connected wallet after a failed push payment. */
 export function useOwed(): { owed: number; refetch: () => void } {
-  const { address } = useAccount()
-  const escrow = CONTRACT_ADDRESS as Address | undefined
+  const { address, chainId } = useAccount()
+  const escrow = getContractAddress(chainId) as Address | undefined
   const { data, refetch } = useReadContract({
     address: escrow,
     abi: ESCROW_ABI,
@@ -319,8 +320,8 @@ const toSec = (iso: string) => BigInt(Math.floor(new Date(iso).getTime() / 1000)
 export function useCreateDeal() {
   const { writeContractAsync } = useWriteContract()
   const client = usePublicClient()
-  const { address } = useAccount()
-  const escrow = CONTRACT_ADDRESS as Address | undefined
+  const { address, chainId } = useAccount()
+  const escrow = getContractAddress(chainId) as Address | undefined
 
   const [isPending, setIsPending] = React.useState(false)
   const [step, setStep] = React.useState<CreateStep>("idle")
@@ -330,6 +331,9 @@ export function useCreateDeal() {
   async function createDeal(input: NewDealInput): Promise<{ dealId: bigint; txHash: `0x${string}` }> {
     if (!escrow) throw new Error("Contract not deployed. Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local")
     if (!address || !client) throw new Error("Wallet not connected")
+    if (chainId !== 5042 && chainId !== 5042002) {
+      throw new Error("Switch your wallet to Arc Mainnet or Arc Testnet")
+    }
 
     setIsPending(true)
     try {
@@ -376,6 +380,15 @@ export function useCreateDeal() {
           args: [address, escrow],
         })
         .catch(() => 0n) // RPC hiccup: fall back to approving
+      const balance = await client.readContract({
+        address: USDC_ADDRESS as Address,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [address],
+      })
+      if (balance < totalRaw) {
+        throw new Error(`Insufficient USDC balance. Need ${formatUnits(totalRaw, USDC_DECIMALS)} USDC.`)
+      }
       if (allowance < totalRaw) {
         setStep("approve")
         const approveTx = await writeContractAsync({
@@ -386,6 +399,15 @@ export function useCreateDeal() {
         })
         setStep("approving")
         await waitForReceipt(client, approveTx)
+        const approved = await client.readContract({
+          address: USDC_ADDRESS as Address,
+          abi: erc20Abi,
+          functionName: "allowance",
+          args: [address, escrow],
+        })
+        if (approved < totalRaw) {
+          throw new Error("USDC approval was confirmed but the allowance is still too low. Check that your wallet is on the selected Arc network.")
+        }
       }
 
       // Step 3: simulate first so a revert surfaces as a readable error, not a silent wallet failure
@@ -447,8 +469,8 @@ type EscrowAction =
 function useEscrowWrite() {
   const { writeContractAsync } = useWriteContract()
   const client = usePublicClient()
-  const { address } = useAccount()
-  const escrow = CONTRACT_ADDRESS as Address | undefined
+  const { address, chainId } = useAccount()
+  const escrow = getContractAddress(chainId) as Address | undefined
   const [pending, setPending] = React.useState<EscrowAction | undefined>()
 
   async function send(functionName: EscrowAction, args: readonly unknown[]) {

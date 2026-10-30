@@ -111,7 +111,7 @@ const label = "text-xs font-medium text-muted-foreground"
 
 export default function NewDealPage() {
   const router = useRouter()
-  const { address: connected } = useAccount()
+  const { address: connected, chainId } = useAccount()
   const { createDeal, isPending, step, txHash } = useCreateDeal()
 
   const [title, setTitle] = React.useState("")
@@ -238,7 +238,7 @@ export default function NewDealPage() {
 
       toast.success("Deal created", {
         description: `$${usdc(total, 2)} USDC locked onchain`,
-        action: { label: "View on explorer", onClick: () => window.open(explorerTx(txHash), "_blank") },
+        action: { label: "View on explorer", onClick: () => window.open(explorerTx(txHash, chainId), "_blank") },
       })
       const recipients: ShareRecipient[] = [
         arb,
@@ -716,7 +716,7 @@ export default function NewDealPage() {
               </DialogFooter>
               {txHash && isPending && (
                 <a
-                  href={explorerTx(txHash)}
+                  href={explorerTx(txHash, chainId)}
                   target="_blank"
                   rel="noreferrer"
                   className="text-center text-xs text-muted-foreground underline-offset-2 hover:underline"
