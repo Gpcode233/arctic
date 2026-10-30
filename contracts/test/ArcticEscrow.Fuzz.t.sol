@@ -4,170 +4,120 @@ pragma solidity ^0.8.28;
 import {ArcticEscrowBase} from "./ArcticEscrow.Base.t.sol";
 import {ArcticEscrow}     from "../ArcticEscrow.sol";
 
-/// @dev Fuzz tests: random amounts/bps, zero USDC balance invariant after
-///      all milestones are released or refunded.
 contract ArcticEscrowFuzzTest is ArcticEscrowBase {
 
-    // ─── Fuzz: single milestone, arbitrary amount, zero remainder ─────────────
-
-    /// @dev For any valid amount and fee, the contract ends with zero USDC balance.
-    function testFuzz_SingleMilestone_ZeroRemainder(uint128 amount) public {
-        // Bound to a sensible range for 6-decimal USDC
-        amount = uint128(bound(amount, 1e6, 1_000_000e6));
-
-        usdc.mint(payer, amount);
-
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "M1", amount: amount,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory sp = new ArcticEscrow.SplitInput[](1);
-        sp[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 10_000});
-
-        vm.prank(payer);
-        usdc.approve(address(escrowNoVault), amount);
-        vm.prank(payer);
-        uint256 dealId = escrowNoVault.createDeal(payee, "Deal", ms, sp, false);
-
-        _approveAndRelease(escrowNoVault, dealId, 0);
-
-        assertEq(usdc.balanceOf(address(escrowNoVault)), 0, "escrow zero");
-    }
-
-    // ─── Fuzz: two splits with arbitrary bps, zero remainder ──────────────────
-
-    /// @dev Random bps split (both ≥1, sum == 10000) yields zero escrow balance.
-    function testFuzz_TwoSplits_ZeroRemainder(uint16 bps0) public {
-        // bps0 in [1, 9999] so bps1 = 10000-bps0 is in [1, 9999]
-        bps0 = uint16(bound(bps0, 1, 9_999));
-        uint16 bps1 = 10_000 - bps0;
-
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "M1", amount: USDC_1K,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-
-        ArcticEscrow.SplitInput[] memory sp = new ArcticEscrow.SplitInput[](2);
-        sp[0] = ArcticEscrow.SplitInput({recipient: payee, bps: bps0});
-        sp[1] = ArcticEscrow.SplitInput({recipient: alice, bps: bps1});
-
-        vm.prank(payer);
-        usdc.approve(address(escrowNoVault), USDC_1K);
-        vm.prank(payer);
-        uint256 dealId = escrowNoVault.createDeal(payee, "Deal", ms, sp, false);
-
-        _approveAndRelease(escrowNoVault, dealId, 0);
-
-        assertEq(usdc.balanceOf(address(escrowNoVault)), 0, "escrow zero");
-    }
-
-    // ─── Fuzz: multiple milestones (2-5), arbitrary amounts, zero remainder ───
-
-    /// @dev Random milestone count and amounts — all released → escrow empty.
-    function testFuzz_MultiMilestone_ZeroRemainder(
-        uint8  mCount,
-        uint64 amt0,
-        uint64 amt1,
-        uint64 amt2
-    ) public {
-        mCount = uint8(bound(mCount, 2, 3));
-        amt0   = uint64(bound(amt0, 1e6, 100_000e6));
-        amt1   = uint64(bound(amt1, 1e6, 100_000e6));
-        amt2   = uint64(bound(amt2, 1e6, 100_000e6));
-
-        uint64[3] memory amts = [amt0, amt1, amt2];
-
-        uint256 total;
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](mCount);
-        for (uint256 i; i < mCount; ++i) {
-            ms[i] = ArcticEscrow.MilestoneInput({
-                title: "M",
-                amount: amts[i],
-                rule: ArcticEscrow.MilestoneRule.Approval,
-                releaseTime: 0
-            });
-            total += amts[i];
-        }
-
-        ArcticEscrow.SplitInput[] memory sp = new ArcticEscrow.SplitInput[](1);
-        sp[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 10_000});
-
-        usdc.mint(payer, total);
-
-        vm.prank(payer);
-        usdc.approve(address(escrowNoVault), total);
-        vm.prank(payer);
-        uint256 dealId = escrowNoVault.createDeal(payee, "Deal", ms, sp, false);
-
-        for (uint256 i; i < mCount; ++i) {
-            _approveAndRelease(escrowNoVault, dealId, i);
-        }
-
-        assertEq(usdc.balanceOf(address(escrowNoVault)), 0, "escrow zero");
-    }
-
-    // ─── Fuzz: refund all milestones → zero escrow balance ────────────────────
-
-    function testFuzz_RefundAll_ZeroRemainder(uint128 amount) public {
-        amount = uint128(bound(amount, 1e6, 1_000_000e6));
-        usdc.mint(payer, amount);
-
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "M1", amount: amount,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory sp = new ArcticEscrow.SplitInput[](1);
-        sp[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 10_000});
-
-        vm.prank(payer);
-        usdc.approve(address(escrowNoVault), amount);
-        vm.prank(payer);
-        uint256 dealId = escrowNoVault.createDeal(payee, "Deal", ms, sp, false);
-
-        vm.prank(payee);
-        escrowNoVault.refundMilestone(dealId, 0);
-
-        assertEq(usdc.balanceOf(address(escrowNoVault)), 0, "escrow zero after refund");
-    }
-
-    // ─── Fuzz: fee math — principal_fee + net == principal ────────────────────
-
-    /// @dev For any principal and feeBps, fee + net must equal principal (no rounding loss stuck in contract).
-    function testFuzz_FeeMath_SumsToGross(uint128 amount, uint16 feeBps_) public {
-        amount  = uint128(bound(amount,  1e6,      1_000_000e6));
-        feeBps_ = uint16(bound(feeBps_, 0,         100));
-
+    function testFuzz_FeeMath_SumsToGross(uint128 amount, uint16 fee) public {
+        amount = uint128(bound(amount, 1, USDC_100K));
+        fee    = uint16(bound(fee, 0, 100));
         vm.prank(owner);
-        ArcticEscrow esc = new ArcticEscrow(address(usdc), address(0), treasury, feeBps_, 0);
+        escrow.setFeeBps(fee);
 
-        usdc.mint(payer, amount);
+        uint256 id = _approvalDeal(amount, address(0));
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
 
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "M", amount: amount,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory sp = new ArcticEscrow.SplitInput[](1);
-        sp[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 10_000});
+        assertEq(usdc.balanceOf(payee) + usdc.balanceOf(treasury), amount);
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+        assertEq(escrow.liabilities(), 0);
+    }
+
+    function testFuzz_Splits_NoDust(uint128 amount, uint16 bpsA, uint16 bpsB) public {
+        amount = uint128(bound(amount, 1, USDC_100K));
+        bpsA   = uint16(bound(bpsA, 1, 9_998));
+        bpsB   = uint16(bound(bpsB, 1, 9_999 - bpsA));
+
+        ArcticEscrow.SplitInput[] memory s = new ArcticEscrow.SplitInput[](3);
+        s[0] = ArcticEscrow.SplitInput({recipient: payee, bps: bpsA});
+        s[1] = ArcticEscrow.SplitInput({recipient: bob,   bps: bpsB});
+        s[2] = ArcticEscrow.SplitInput({recipient: stranger, bps: 10_000 - bpsA - bpsB});
+        uint256 id = _create(_one(_approvalMs(amount)), s, address(0));
+        _accept(id);
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
+
+        uint256 paid = usdc.balanceOf(payee) + usdc.balanceOf(bob) + usdc.balanceOf(stranger);
+        assertEq(paid, _net(amount));
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+    }
+
+    /// @dev Random mix of releases and refunds across many milestones always
+    ///      settles exactly, with no dust and no insolvency along the way.
+    function testFuzz_MixedSettlement(uint8 count, uint256 seed) public {
+        count = uint8(bound(count, 1, 20));
+        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](count);
+        for (uint256 i; i < count; ++i) {
+            ms[i] = _approvalMs(uint128(bound(uint256(keccak256(abi.encode(seed, i))), 1, 5_000e6)));
+        }
+        uint256 total = _sum(ms);
+        uint256 id = _create(ms, _splitTo(payee), address(0));
+        _accept(id);
+
+        uint256 releasedGross;
+        for (uint256 i; i < count; ++i) {
+            uint256 r = uint256(keccak256(abi.encode(seed, i, "op"))) % 3;
+            if (r == 0) {
+                vm.prank(payee);
+                escrow.refundMilestone(id, i);
+            } else {
+                _deliver(id, i);
+                if (r == 1) {
+                    vm.prank(payer);
+                    escrow.releaseMilestone(id, i);
+                } else {
+                    vm.warp(block.timestamp + REVIEW);
+                    escrow.releaseMilestone(id, i);
+                }
+                releasedGross += ms[i].amount;
+            }
+            _assertSolvent();
+        }
+
+        ArcticEscrow.Deal memory d = escrow.getDeal(id);
+        assertEq(uint8(d.status), uint8(ArcticEscrow.DealStatus.Completed));
+        assertEq(d.released, releasedGross);
+        assertEq(uint256(d.released) + d.refunded, total);
+        assertEq(usdc.balanceOf(payer), USDC_100K - releasedGross);
+        assertEq(usdc.balanceOf(payee) + usdc.balanceOf(treasury), releasedGross);
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+        assertEq(escrow.liabilities(), 0);
+    }
+
+    function testFuzz_PayerRefundGate(uint64 elapsed) public {
+        elapsed = uint64(bound(elapsed, 0, 2 * uint256(DELIVER)));
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        vm.warp(block.timestamp + elapsed);
 
         vm.prank(payer);
-        usdc.approve(address(esc), amount);
-        vm.prank(payer);
-        uint256 dealId = esc.createDeal(payee, "D", ms, sp, false);
+        if (elapsed > DELIVER) {
+            escrow.refundMilestone(id, 0);
+            assertEq(usdc.balanceOf(payer), USDC_100K);
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(ArcticEscrow.NotRefundable.selector, id, 0));
+            escrow.refundMilestone(id, 0);
+        }
+    }
 
-        uint256 payeeBefore    = usdc.balanceOf(payee);
-        uint256 treasuryBefore = usdc.balanceOf(treasury);
+    function testFuzz_ReviewWindowGate(uint32 review, uint64 elapsed) public {
+        review  = uint32(bound(review, 1 hours, 90 days));
+        elapsed = uint64(bound(elapsed, 0, 2 * uint256(review)));
 
-        vm.prank(payee); esc.markDelivered(dealId, 0);
-        vm.prank(payer); esc.releaseMilestone(dealId, 0);
+        vm.startPrank(payer);
+        usdc.approve(address(escrow), USDC_1K);
+        uint256 id = escrow.createDeal(payee, address(0), "D", _one(_approvalMs(USDC_1K)), _splitTo(payee), review);
+        vm.stopPrank();
+        _accept(id);
+        _deliver(id, 0);
+        vm.warp(block.timestamp + elapsed);
 
-        uint256 payeeNet   = usdc.balanceOf(payee)    - payeeBefore;
-        uint256 treasFee   = usdc.balanceOf(treasury) - treasuryBefore;
-
-        assertEq(payeeNet + treasFee, amount, "fee + net == gross");
-        assertEq(usdc.balanceOf(address(esc)), 0, "escrow zero");
+        vm.prank(stranger);
+        if (elapsed >= review) {
+            escrow.releaseMilestone(id, 0);
+            assertEq(usdc.balanceOf(payee), _net(USDC_1K));
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(ArcticEscrow.NotReleasable.selector, id, 0));
+            escrow.releaseMilestone(id, 0);
+        }
     }
 }

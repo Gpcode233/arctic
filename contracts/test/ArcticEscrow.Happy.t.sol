@@ -4,352 +4,327 @@ pragma solidity ^0.8.28;
 import {ArcticEscrowBase} from "./ArcticEscrow.Base.t.sol";
 import {ArcticEscrow}     from "../ArcticEscrow.sol";
 
-/// @dev Happy-path tests: Approval rule, Schedule rule, splits, fee math,
-///      refundMilestone, dealsByPayer/Payee, pendingYield (no yield).
 contract ArcticEscrowHappyTest is ArcticEscrowBase {
 
-    // ── createDeal ─────────────────────────────────────────────────────────────
+    // ── Creation ──────────────────────────────────────────────────────────────
 
-    function test_CreateDeal_IncrementsDealCount() public {
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        assertEq(escrowNoVault.dealCount(), 1);
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        assertEq(escrowNoVault.dealCount(), 2);
-    }
+    function test_Create_StoresDeal() public {
+        uint256 id = _create(_one(_approvalMs(USDC_1K)), _splitTo(payee), arbiter);
+        ArcticEscrow.Deal memory d = escrow.getDeal(id);
 
-    function test_CreateDeal_PullsUSDCFromPayer() public {
-        uint256 before = usdc.balanceOf(payer);
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        assertEq(usdc.balanceOf(payer), before - USDC_1K);
-        assertEq(usdc.balanceOf(address(escrowNoVault)), USDC_1K);
-    }
-
-    function test_CreateDeal_EmitsDealCreated() public {
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "MS1", amount: USDC_1K,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory splits = new ArcticEscrow.SplitInput[](1);
-        splits[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 10_000});
-
-        vm.startPrank(payer);
-        usdc.approve(address(escrowNoVault), USDC_1K);
-        vm.expectEmit(true, true, true, true, address(escrowNoVault));
-        emit ArcticEscrow.DealCreated(0, payer, payee, "Deal1", USDC_1K, false);
-        escrowNoVault.createDeal(payee, "Deal1", ms, splits, false);
-        vm.stopPrank();
-    }
-
-    function test_CreateDeal_DealsByPayer() public {
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        uint256[] memory ids = escrowNoVault.dealsByPayer(payer);
-        assertEq(ids.length, 2);
-        assertEq(ids[0], 0);
-        assertEq(ids[1], 1);
-    }
-
-    function test_CreateDeal_DealsByPayee() public {
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        uint256[] memory ids = escrowNoVault.dealsByPayee(payee);
-        assertEq(ids.length, 2);
-        assertEq(ids[0], 0);
-        assertEq(ids[1], 1);
-    }
-
-    function test_CreateDeal_StoresTitleHash() public {
-        _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        bytes32 expected = keccak256(bytes("Deal1"));
-        assertEq(escrowNoVault.getDealTitleHash(0), expected);
-    }
-
-    // ── Approval rule happy path ────────────────────────────────────────────
-
-    function test_ApprovalRule_FullFlow() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-
-        uint256 payeeBefore    = usdc.balanceOf(payee);
-        uint256 treasuryBefore = usdc.balanceOf(treasury);
-        uint256 escrowBefore   = usdc.balanceOf(address(escrowNoVault));
-
-        vm.prank(payee);
-        vm.expectEmit(true, false, false, true, address(escrowNoVault));
-        emit ArcticEscrow.MilestoneDelivered(dealId, 0);
-        escrowNoVault.markDelivered(dealId, 0);
-
-        vm.prank(payer);
-        escrowNoVault.releaseMilestone(dealId, 0);
-
-        uint256 expectedFee = (uint256(USDC_1K) * FEE_BPS) / 10_000;
-        uint256 expectedNet = USDC_1K - expectedFee;
-
-        assertEq(usdc.balanceOf(payee)    - payeeBefore,    expectedNet,  "payee net");
-        assertEq(usdc.balanceOf(treasury) - treasuryBefore, expectedFee,  "treasury fee");
-        assertEq(escrowBefore - usdc.balanceOf(address(escrowNoVault)), USDC_1K, "escrow drained");
-
-        ArcticEscrow.Deal memory d = escrowNoVault.getDeal(dealId);
-        assertEq(uint8(d.status), uint8(ArcticEscrow.DealStatus.Completed));
-        assertEq(d.released, USDC_1K);
-    }
-
-    function test_ApprovalRule_EmitsMilestoneReleased() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        vm.prank(payee); escrowNoVault.markDelivered(dealId, 0);
-
-        uint128 fee = uint128((uint256(USDC_1K) * FEE_BPS) / 10_000);
-        vm.prank(payer);
-        vm.expectEmit(true, false, false, true, address(escrowNoVault));
-        emit ArcticEscrow.MilestoneReleased(dealId, 0, USDC_1K, fee);
-        escrowNoVault.releaseMilestone(dealId, 0);
-    }
-
-    function test_ApprovalRule_EmitsSplitPaid() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        vm.prank(payee); escrowNoVault.markDelivered(dealId, 0);
-
-        uint128 net = uint128(uint256(USDC_1K) - (uint256(USDC_1K) * FEE_BPS) / 10_000);
-        vm.prank(payer);
-        vm.expectEmit(true, false, true, true, address(escrowNoVault));
-        emit ArcticEscrow.SplitPaid(dealId, 0, payee, net);
-        escrowNoVault.releaseMilestone(dealId, 0);
-    }
-
-    // ── Schedule rule happy path ──────────────────────────────────────────────
-
-    function test_ScheduleRule_ReleasedByAnyoneAfterTime() public {
-        uint128 releaseTime = uint128(block.timestamp + 1 days);
-        uint256 dealId = _oneMilestoneSchedule(escrowNoVault, USDC_1K, releaseTime);
-
-        // Before release time — should revert
-        vm.expectRevert(
-            abi.encodeWithSelector(ArcticEscrow.NotReleasable.selector, dealId, 0)
-        );
-        escrowNoVault.releaseMilestone(dealId, 0);
-
-        vm.warp(block.timestamp + 1 days);
-
-        uint256 payeeBefore    = usdc.balanceOf(payee);
-        uint256 treasuryBefore = usdc.balanceOf(treasury);
-
-        // stranger (not payer or payee) can release
-        vm.prank(stranger);
-        escrowNoVault.releaseMilestone(dealId, 0);
-
-        uint256 expectedFee = (uint256(USDC_1K) * FEE_BPS) / 10_000;
-        uint256 expectedNet = USDC_1K - expectedFee;
-
-        assertEq(usdc.balanceOf(payee)    - payeeBefore,    expectedNet, "payee net");
-        assertEq(usdc.balanceOf(treasury) - treasuryBefore, expectedFee, "treasury fee");
-    }
-
-    // ── Fee math boundary: feeBps=0 and feeBps=100 ─────────────────────────
-
-    function test_FeeBps_Zero_NoFeeCharged() public {
-        vm.startPrank(owner);
-        ArcticEscrow esc0 = new ArcticEscrow(address(usdc), address(0), treasury, 0, 0);
-        vm.stopPrank();
-
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "MS1", amount: USDC_1K,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory splits = new ArcticEscrow.SplitInput[](1);
-        splits[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 10_000});
-
-        vm.startPrank(payer);
-        usdc.approve(address(esc0), USDC_1K);
-        uint256 dealId = esc0.createDeal(payee, "D0", ms, splits, false);
-        vm.stopPrank();
-
-        uint256 payeeBefore    = usdc.balanceOf(payee);
-        uint256 treasuryBefore = usdc.balanceOf(treasury);
-
-        vm.prank(payee); esc0.markDelivered(dealId, 0);
-        vm.prank(payer); esc0.releaseMilestone(dealId, 0);
-
-        assertEq(usdc.balanceOf(payee)    - payeeBefore,    USDC_1K, "payee gets all");
-        assertEq(usdc.balanceOf(treasury) - treasuryBefore, 0,       "treasury zero");
-    }
-
-    function test_FeeBps_100_MaxFee() public {
-        vm.startPrank(owner);
-        ArcticEscrow esc100 = new ArcticEscrow(address(usdc), address(0), treasury, 100, 0);
-        vm.stopPrank();
-
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "MS1", amount: USDC_1K,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory splits = new ArcticEscrow.SplitInput[](1);
-        splits[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 10_000});
-
-        vm.startPrank(payer);
-        usdc.approve(address(esc100), USDC_1K);
-        uint256 dealId = esc100.createDeal(payee, "D100", ms, splits, false);
-        vm.stopPrank();
-
-        uint256 payeeBefore    = usdc.balanceOf(payee);
-        uint256 treasuryBefore = usdc.balanceOf(treasury);
-
-        vm.prank(payee); esc100.markDelivered(dealId, 0);
-        vm.prank(payer); esc100.releaseMilestone(dealId, 0);
-
-        uint256 expectedFee = (uint256(USDC_1K) * 100) / 10_000; // 1 %
-        uint256 expectedNet = USDC_1K - expectedFee;
-        assertEq(usdc.balanceOf(payee)    - payeeBefore,    expectedNet,  "payee net");
-        assertEq(usdc.balanceOf(treasury) - treasuryBefore, expectedFee,  "treasury fee");
-    }
-
-    // ── Multi-split: uneven remainder ends at zero balance ─────────────────
-
-    function test_UnevenSplit_ZeroRemainder() public {
-        // 3 recipients with bps 3333 + 3333 + 4334 = 10000
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "MS1", amount: USDC_1K,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory splits = new ArcticEscrow.SplitInput[](3);
-        splits[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 3333});
-        splits[1] = ArcticEscrow.SplitInput({recipient: alice, bps: 3333});
-        splits[2] = ArcticEscrow.SplitInput({recipient: bob,   bps: 3334});
-
-        vm.startPrank(payer);
-        usdc.approve(address(escrowNoVault), USDC_1K);
-        uint256 dealId = escrowNoVault.createDeal(payee, "Split3", ms, splits, false);
-        vm.stopPrank();
-
-        vm.prank(payee); escrowNoVault.markDelivered(dealId, 0);
-        vm.prank(payer); escrowNoVault.releaseMilestone(dealId, 0);
-
-        // Contract should hold only treasury fee, already sent; should be 0
-        assertEq(usdc.balanceOf(address(escrowNoVault)), 0, "escrow zero balance");
-    }
-
-    // ── refundMilestone ────────────────────────────────────────────────────────
-
-    function test_Refund_PayeeCanRefundPending() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        uint256 payerBefore = usdc.balanceOf(payer);
-
-        vm.prank(payee);
-        vm.expectEmit(true, false, false, true, address(escrowNoVault));
-        emit ArcticEscrow.MilestoneRefunded(dealId, 0, USDC_1K);
-        escrowNoVault.refundMilestone(dealId, 0);
-
-        assertEq(usdc.balanceOf(payer) - payerBefore, USDC_1K, "payer refund");
-        ArcticEscrow.Milestone[] memory m = escrowNoVault.getMilestones(dealId);
-        assertEq(uint8(m[0].state), uint8(ArcticEscrow.MilestoneState.Refunded));
-    }
-
-    function test_Refund_PayeeCanRefundDelivered() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-
-        vm.prank(payee); escrowNoVault.markDelivered(dealId, 0);
-
-        uint256 payerBefore = usdc.balanceOf(payer);
-        vm.prank(payee);
-        escrowNoVault.refundMilestone(dealId, 0);
-
-        assertEq(usdc.balanceOf(payer) - payerBefore, USDC_1K, "payer refund");
-    }
-
-    function test_Refund_PayerCanRefundPending() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        uint256 payerBefore = usdc.balanceOf(payer);
-
-        vm.prank(payer);
-        escrowNoVault.refundMilestone(dealId, 0);
-
-        assertEq(usdc.balanceOf(payer) - payerBefore, USDC_1K, "payer refund");
-    }
-
-    function test_Refund_PayerCannotRefundDelivered() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-
-        vm.prank(payee); escrowNoVault.markDelivered(dealId, 0);
-
-        vm.prank(payer);
-        vm.expectRevert(
-            abi.encodeWithSelector(ArcticEscrow.NotReleasable.selector, dealId, 0)
-        );
-        escrowNoVault.refundMilestone(dealId, 0);
-    }
-
-    // ── pendingYield with no vault ─────────────────────────────────────────
-
-    function test_PendingYield_ZeroWhenNoYield() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        assertEq(escrowNoVault.pendingYield(dealId), 0);
-    }
-
-    // ── getDeal / getMilestones / getSplits ───────────────────────────────
-
-    function test_Views_GetDeal() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        ArcticEscrow.Deal memory d = escrowNoVault.getDeal(dealId);
-        assertEq(d.payer,  payer);
-        assertEq(d.payee,  payee);
-        assertEq(d.total,  USDC_1K);
+        assertEq(id, 0);
+        assertEq(d.payer, payer);
+        assertEq(d.payee, payee);
+        assertEq(d.arbiter, arbiter);
+        assertEq(d.total, USDC_1K);
+        assertEq(d.reviewPeriod, REVIEW);
         assertEq(d.feeBps, FEE_BPS);
-        assertFalse(d.earnYield);
+        assertEq(d.acceptedAt, 0);
+        assertEq(uint8(d.status), uint8(ArcticEscrow.DealStatus.Funded));
+        assertEq(escrow.getDealTitleHash(id), keccak256("Deal"));
+        assertEq(escrow.getMilestoneTitleHash(id, 0), keccak256("MS"));
+        assertEq(usdc.balanceOf(address(escrow)), USDC_1K);
+        assertEq(escrow.liabilities(), USDC_1K);
     }
 
-    function test_Views_GetMilestones() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        ArcticEscrow.Milestone[] memory m = escrowNoVault.getMilestones(dealId);
-        assertEq(m.length, 1);
-        assertEq(m[0].amount, USDC_1K);
-        assertEq(uint8(m[0].rule), uint8(ArcticEscrow.MilestoneRule.Approval));
-    }
-
-    function test_Views_GetSplits() public {
-        uint256 dealId = _oneMilestoneApproval(escrowNoVault, USDC_1K);
-        ArcticEscrow.Split[] memory s = escrowNoVault.getSplits(dealId);
-        assertEq(s.length, 1);
-        assertEq(s[0].recipient, payee);
-        assertEq(s[0].bps, 10_000);
-    }
-
-    // ── SplitFailed: reroute to payer ─────────────────────────────────────
-
-    function test_SplitFailed_ReroutesToPayer() public {
-        // Set up a deal where alice is the split recipient
-        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](1);
-        ms[0] = ArcticEscrow.MilestoneInput({
-            title: "MS1", amount: USDC_1K,
-            rule: ArcticEscrow.MilestoneRule.Approval, releaseTime: 0
-        });
-        ArcticEscrow.SplitInput[] memory splits = new ArcticEscrow.SplitInput[](1);
-        splits[0] = ArcticEscrow.SplitInput({recipient: alice, bps: 10_000});
-
+    function test_Create_EmitsEvent() public {
         vm.startPrank(payer);
-        usdc.approve(address(escrowNoVault), USDC_1K);
-        uint256 dealId = escrowNoVault.createDeal(payee, "SplitFail", ms, splits, false);
+        usdc.approve(address(escrow), USDC_1K);
+        vm.expectEmit(true, true, true, true);
+        emit ArcticEscrow.DealCreated(0, payer, payee, "Deal", USDC_1K, address(0), REVIEW);
+        escrow.createDeal(payee, address(0), "Deal", _one(_approvalMs(USDC_1K)), _splitTo(payee), REVIEW);
         vm.stopPrank();
+    }
 
-        // Block transfers to alice AFTER deal creation
-        usdc.setRevertOnTransferTo(alice);
+    function test_Create_StoresMilestoneDeadlines() public {
+        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](2);
+        ms[0] = _approvalMs(100e6);
+        ms[0].releaseTime = 123; // ignored for Approval
+        ms[1] = _scheduleMs(200e6, uint64(block.timestamp + 10 days));
+        ms[1].deliverBy = 456;   // ignored for Schedule
+        uint256 id = _create(ms, _splitTo(payee), address(0));
 
-        uint256 payerBefore = usdc.balanceOf(payer);
+        ArcticEscrow.Milestone[] memory stored = escrow.getMilestones(id);
+        assertEq(stored[0].releaseTime, 0);
+        assertEq(stored[0].deliverBy, block.timestamp + DELIVER);
+        assertEq(stored[1].releaseTime, block.timestamp + 10 days);
+        assertEq(stored[1].deliverBy, 0);
+    }
 
-        vm.prank(payee); escrowNoVault.markDelivered(dealId, 0);
+    function test_Accept() public {
+        uint256 id = _create(_one(_approvalMs(USDC_1K)), _splitTo(payee), address(0));
+        vm.expectEmit(true, false, false, false);
+        emit ArcticEscrow.DealAccepted(id);
+        _accept(id);
+        assertEq(escrow.getDeal(id).acceptedAt, block.timestamp);
+    }
 
-        uint128 net = uint128(uint256(USDC_1K) - (uint256(USDC_1K) * FEE_BPS) / 10_000);
+    // ── Approval flow ─────────────────────────────────────────────────────────
+
+    function test_Approval_PayerReleases() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        assertEq(uint8(_state(id, 0)), uint8(ArcticEscrow.MilestoneState.Delivered));
 
         vm.prank(payer);
-        vm.expectEmit(true, false, true, true, address(escrowNoVault));
-        emit ArcticEscrow.SplitFailed(dealId, 0, alice, net);
-        escrowNoVault.releaseMilestone(dealId, 0);
+        escrow.releaseMilestone(id, 0);
 
-        // Share rerouted to payer
-        assertEq(usdc.balanceOf(payer) - payerBefore, net, "payer got rerouted share");
-        // Milestone completes
-        ArcticEscrow.Milestone[] memory m = escrowNoVault.getMilestones(dealId);
-        assertEq(uint8(m[0].state), uint8(ArcticEscrow.MilestoneState.Released));
+        uint256 fee = (uint256(USDC_1K) * FEE_BPS) / 10_000;
+        assertEq(usdc.balanceOf(payee), USDC_1K - fee);
+        assertEq(usdc.balanceOf(treasury), fee);
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+        assertEq(escrow.liabilities(), 0);
+        assertEq(uint8(_status(id)), uint8(ArcticEscrow.DealStatus.Completed));
+        assertEq(escrow.getDeal(id).released, USDC_1K);
+    }
+
+    function test_Approval_AutoReleaseAfterReview_ByAnyone() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.warp(block.timestamp + REVIEW);
+
+        vm.prank(stranger);
+        escrow.releaseMilestone(id, 0);
+        assertEq(usdc.balanceOf(payee), _net(USDC_1K));
+    }
+
+    function test_Approval_PayeeCanClaimAfterReview() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.warp(block.timestamp + REVIEW);
+
+        vm.prank(payee);
+        escrow.releaseMilestone(id, 0);
+        assertEq(usdc.balanceOf(payee), _net(USDC_1K));
+    }
+
+    function test_Approval_LateDeliveryStillAllowedIfNotRefunded() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        vm.warp(block.timestamp + DELIVER + 1);
+        _deliver(id, 0);
+        // Once delivered, the payer can no longer refund unilaterally
+        vm.prank(payer);
+        vm.expectRevert(abi.encodeWithSelector(ArcticEscrow.NotRefundable.selector, id, 0));
+        escrow.refundMilestone(id, 0);
+    }
+
+    // ── Disputes ──────────────────────────────────────────────────────────────
+
+    function test_Dispute_PayeeResubmitsThenPayerReleases() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.disputeMilestone(id, 0);
+        assertEq(uint8(_state(id, 0)), uint8(ArcticEscrow.MilestoneState.Disputed));
+
+        vm.warp(block.timestamp + 2 days);
+        _deliver(id, 0); // resubmit restarts the review clock
+        assertEq(escrow.getMilestones(id)[0].deliveredAt, block.timestamp);
+
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
+        assertEq(usdc.balanceOf(payee), _net(USDC_1K));
+    }
+
+    function test_Dispute_PayerConcedes() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.disputeMilestone(id, 0);
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
+        assertEq(usdc.balanceOf(payee), _net(USDC_1K));
+    }
+
+    function test_Dispute_PayeeConcedes() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.disputeMilestone(id, 0);
+
+        uint256 before = usdc.balanceOf(payer);
+        vm.prank(payee);
+        escrow.refundMilestone(id, 0);
+        assertEq(usdc.balanceOf(payer) - before, USDC_1K);
+    }
+
+    function test_Dispute_ArbiterReleases() public {
+        uint256 id = _approvalDeal(USDC_1K, arbiter);
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.disputeMilestone(id, 0);
+
+        vm.expectEmit(true, false, false, true);
+        emit ArcticEscrow.DisputeResolved(id, 0, true);
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, true);
+        assertEq(usdc.balanceOf(payee), _net(USDC_1K));
+        assertEq(usdc.balanceOf(arbiter), 0);
+    }
+
+    function test_Dispute_ArbiterRefunds() public {
+        uint256 id = _approvalDeal(USDC_1K, arbiter);
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.disputeMilestone(id, 0);
+
+        uint256 before = usdc.balanceOf(payer);
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, false);
+        assertEq(usdc.balanceOf(payer) - before, USDC_1K);
+        assertEq(usdc.balanceOf(payee), 0);
+    }
+
+    // ── Refunds ───────────────────────────────────────────────────────────────
+
+    function test_Refund_PayerBeforeAcceptance() public {
+        uint256 id = _create(_one(_approvalMs(USDC_1K)), _splitTo(payee), address(0));
+        uint256 before = usdc.balanceOf(payer);
+        vm.prank(payer);
+        escrow.refundMilestone(id, 0);
+        assertEq(usdc.balanceOf(payer) - before, USDC_1K);
+        assertEq(uint8(_status(id)), uint8(ArcticEscrow.DealStatus.Completed));
+        assertEq(escrow.getDeal(id).refunded, USDC_1K);
+    }
+
+    function test_Refund_PayerScheduleBeforeAcceptance() public {
+        uint256 id = _create(_one(_scheduleMs(USDC_1K, uint64(block.timestamp + 1 days))), _splitTo(payee), address(0));
+        vm.prank(payer);
+        escrow.refundMilestone(id, 0);
+        assertEq(usdc.balanceOf(payer), USDC_100K);
+    }
+
+    function test_Refund_PayerAfterDeliveryDeadline() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        vm.warp(block.timestamp + DELIVER + 1);
+        vm.prank(payer);
+        escrow.refundMilestone(id, 0);
+        assertEq(usdc.balanceOf(payer), USDC_100K);
+    }
+
+    function test_Refund_PayeePending() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        vm.prank(payee);
+        escrow.refundMilestone(id, 0);
+        assertEq(usdc.balanceOf(payer), USDC_100K);
+    }
+
+    function test_Refund_PayeeDelivered() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.prank(payee);
+        escrow.refundMilestone(id, 0);
+        assertEq(usdc.balanceOf(payer), USDC_100K);
+    }
+
+    function test_Refund_PayeeSchedule() public {
+        uint256 id = _scheduleDeal(USDC_1K, uint64(block.timestamp + 1 days));
+        vm.prank(payee);
+        escrow.refundMilestone(id, 0);
+        assertEq(usdc.balanceOf(payer), USDC_100K);
+    }
+
+    // ── Schedule flow ─────────────────────────────────────────────────────────
+
+    function test_Schedule_AnyoneReleasesAtTime() public {
+        uint64 t = uint64(block.timestamp + 30 days);
+        uint256 id = _scheduleDeal(USDC_1K, t);
+        vm.warp(t);
+        vm.prank(stranger);
+        escrow.releaseMilestone(id, 0);
+        assertEq(usdc.balanceOf(payee), _net(USDC_1K));
+    }
+
+    function test_Schedule_VestingTwelveMonths() public {
+        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](12);
+        for (uint256 i; i < 12; ++i) ms[i] = _scheduleMs(100e6, uint64(block.timestamp + (i + 1) * 30 days));
+        uint256 id = _create(ms, _splitTo(payee), address(0));
+        _accept(id);
+
+        for (uint256 i; i < 12; ++i) {
+            vm.warp(ms[i].releaseTime);
+            escrow.releaseMilestone(id, i);
+        }
+        assertEq(usdc.balanceOf(payee), _net(1_200e6));
+        assertEq(uint8(_status(id)), uint8(ArcticEscrow.DealStatus.Completed));
+        _assertSolvent();
+    }
+
+    // ── Multi milestone / splits ──────────────────────────────────────────────
+
+    function test_MultiMilestone_StatusProgression() public {
+        ArcticEscrow.MilestoneInput[] memory ms = new ArcticEscrow.MilestoneInput[](2);
+        ms[0] = _approvalMs(400e6);
+        ms[1] = _approvalMs(600e6);
+        uint256 id = _create(ms, _splitTo(payee), address(0));
+        _accept(id);
+
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
+        assertEq(uint8(_status(id)), uint8(ArcticEscrow.DealStatus.InProgress));
+
+        vm.prank(payee);
+        escrow.refundMilestone(id, 1);
+        assertEq(uint8(_status(id)), uint8(ArcticEscrow.DealStatus.Completed));
+        assertEq(usdc.balanceOf(payee), _net(400e6));
+        assertEq(usdc.balanceOf(payer), USDC_100K - 400e6);
+    }
+
+    function test_Splits_ThreeWayWithRemainder() public {
+        ArcticEscrow.SplitInput[] memory s = new ArcticEscrow.SplitInput[](3);
+        s[0] = ArcticEscrow.SplitInput({recipient: payee, bps: 3_333});
+        s[1] = ArcticEscrow.SplitInput({recipient: alice, bps: 3_333});
+        s[2] = ArcticEscrow.SplitInput({recipient: bob,   bps: 3_334});
+        uint256 id = _create(_one(_approvalMs(1_000_001)), s, address(0));
+        _accept(id);
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
+
+        uint256 net = _net(1_000_001);
+        uint256 a = (net * 3_333) / 10_000;
+        assertEq(usdc.balanceOf(payee), a);
+        assertEq(usdc.balanceOf(alice), USDC_100K + a);
+        assertEq(usdc.balanceOf(bob), net - 2 * a);
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+    }
+
+    function test_Splits_EmitSplitPaid() public {
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.expectEmit(true, true, false, true);
+        emit ArcticEscrow.SplitPaid(id, 0, payee, uint128(_net(USDC_1K)));
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
+    }
+
+    function test_ZeroFee_NoTreasuryTransfer() public {
+        vm.prank(owner);
+        escrow.setFeeBps(0);
+        uint256 id = _approvalDeal(USDC_1K, address(0));
+        _deliver(id, 0);
+        vm.prank(payer);
+        escrow.releaseMilestone(id, 0);
+        assertEq(usdc.balanceOf(payee), USDC_1K);
+        assertEq(usdc.balanceOf(treasury), 0);
+    }
+
+    // ── Pagination ────────────────────────────────────────────────────────────
+
+    function test_Pagination() public {
+        for (uint256 i; i < 5; ++i) _create(_one(_approvalMs(1e6)), _splitTo(payee), address(0));
+
+        assertEq(escrow.dealCountByPayee(payee), 5);
+        assertEq(escrow.dealCountByPayer(payer), 5);
+
+        uint256[] memory page = escrow.dealsByPayee(payee, 1, 3);
+        assertEq(page.length, 3);
+        assertEq(page[0], 1);
+        assertEq(page[2], 3);
+
+        assertEq(escrow.dealsByPayer(payer, 4, 10).length, 1);
+        assertEq(escrow.dealsByPayer(payer, 5, 10).length, 0);
+        assertEq(escrow.dealsByPayer(payer, 0, type(uint256).max).length, 5);
     }
 }

@@ -9,6 +9,7 @@ const labels: Record<DealStatus | MilestoneStatus, string> = {
   submitted: "Awaiting release",
   released: "Released",
   refunded: "Refunded",
+  disputed: "Disputed",
 }
 
 const tones: Record<DealStatus | MilestoneStatus, string> = {
@@ -19,6 +20,7 @@ const tones: Record<DealStatus | MilestoneStatus, string> = {
   submitted: "text-foreground",
   released: "text-foreground",
   refunded: "text-muted-foreground",
+  disputed: "text-destructive",
 }
 
 export function StatusBadge({

@@ -1,6 +1,6 @@
 export type DealStatus = "funded" | "in_progress" | "completed"
 
-export type MilestoneStatus = "pending" | "submitted" | "released" | "refunded"
+export type MilestoneStatus = "pending" | "submitted" | "released" | "refunded" | "disputed"
 
 export type ReleaseRule = "approval" | "schedule"
 
@@ -16,7 +16,9 @@ export type Milestone = {
   rule: ReleaseRule
   status: MilestoneStatus
   dueAt?: string     // ISO string for schedule milestones
-  releasedAt?: string
+  deliverBy?: string // ISO delivery deadline for approval milestones
+  deliveredAt?: string
+  releasedAt?: string  // release or refund time
   txHash?: string    // release/refund tx hash from events
 }
 
@@ -31,14 +33,16 @@ export type Deal = {
   title: string      // from DealCreated event
   payer: Party
   payee: Party
+  arbiter?: Party    // undefined when the deal has no arbiter
   total: number      // USDC whole units
   released: number
+  refunded: number
   status: DealStatus
   createdAt: string  // ISO
+  acceptedAt?: string  // ISO; undefined until the payee accepts
+  reviewPeriod: number // seconds the payer has to review a delivery
   milestones: Milestone[]
   splits: SplitShare[]
-  earnYield: boolean
-  yieldEarned?: number  // pending yield in USDC from pendingYield view
   feeBps: number
 }
 

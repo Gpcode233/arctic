@@ -1,41 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-interface IEscrow {
-    function releaseMilestone(uint256 dealId, uint256 index) external;
-}
-
-/// @dev Attacker contract that attempts to reenter releaseMilestone during
-///      the vault's redeem callback.  The ReentrancyGuard on ArcticEscrow
-///      must reject the second call.
+/// @dev Called by MockUSDC on every transfer; tries to reenter the escrow with
+///      preset calldata. ArcticEscrow's ReentrancyGuard must reject it.
 contract ReentrantAttacker {
-    IEscrow public escrow;
-    uint256 public dealId;
-    uint256 public index;
+    address public escrow;
+    bytes   public payload;
+    bool    public attempted;
+    bool    public succeeded;
 
-    bool public attackFired;
-    bool public attackReverted;
+    constructor(address _escrow) { escrow = _escrow; }
 
-    constructor(address _escrow) {
-        escrow = IEscrow(_escrow);
+    function arm(bytes calldata data) external {
+        payload   = data;
+        attempted = false;
+        succeeded = false;
     }
 
-    function setTarget(uint256 _dealId, uint256 _index) external {
-        dealId = _dealId;
-        index  = _index;
+    function onTransfer() external {
+        if (attempted || payload.length == 0) return;
+        attempted = true;
+        (bool ok,) = escrow.call(payload);
+        succeeded = ok;
     }
-
-    /// @dev Called by MockVault.redeem() to simulate reentrancy.
-    fallback() external {
-        if (!attackFired) {
-            attackFired = true;
-            try escrow.releaseMilestone(dealId, index) {
-                // Should NOT succeed — reentrancy guard must block it
-            } catch {
-                attackReverted = true;
-            }
-        }
-    }
-
-    receive() external payable {}
 }

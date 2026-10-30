@@ -5,56 +5,65 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
-interface IERC4626 {
-    function asset() external view returns (address);
-    function deposit(uint256 assets, address receiver) external returns (uint256 shares);
-    function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
-    function convertToAssets(uint256 shares) external view returns (uint256);
-}
-
 /**
- * @title  ArcticEscrow
- * @notice Milestone-based USDC escrow with optional ERC-4626 yield accrual on Arc.
+ * @title  ArcticEscrow (v2)
+ * @notice Milestone-based USDC escrow on Arc.
  *
- * Deals contain:
- *   - Up to 20 milestones, each with an Approval or Schedule release rule.
- *   - Up to 10 split recipients whose bps must sum to exactly 10 000.
- *   - An optional earnYield flag that deposits the whole principal into a
- *     configured ERC-4626 vault (e.g. a Morpho vault) while the deal is active.
+ * Lifecycle:
+ *   1. Payer creates and funds a deal. Funds are pulled into this contract.
+ *   2. Payee reviews the terms (milestones, splits, arbiter) and calls acceptDeal.
+ *      Until then the payer may refund any milestone.
+ *   3. Approval milestones: payee calls markDelivered. The payer then has
+ *      `reviewPeriod` seconds to release or dispute. If the payer does neither,
+ *      anyone may release once the review period ends.
+ *      If the payee never delivers, the payer may refund after `deliverBy`.
+ *   4. Schedule milestones: anyone may release once `releaseTime` is reached.
+ *      After acceptance the payer can no longer revoke them.
+ *   5. Disputes: the optional per-deal arbiter settles a disputed milestone by
+ *      releasing it or refunding it. Either party may also settle a dispute
+ *      themselves: the payer by releasing, the payee by refunding.
  *
- * Fees:
- *   - feeBps     (snapshotted per deal) taken from principal on each release.
- *   - yieldFeeBps (snapshotted per deal) taken from realized yield on release/refund.
- *   Both are set at creation time so that later admin changes never affect live deals.
- *
- * Pull-based split payments: each split share is pushed via a low-level call; on
- * failure the share is rerouted to the payer and SplitFailed is emitted, so a
- * blocked recipient never bricks milestone completion.
- *
- * Liveness: both the payer AND the payee may call refundMilestone.  The payer may
- * only refund milestones still in the Pending state (before the payee marks delivered);
- * the payee may refund Pending or Delivered milestones.  This guarantees that payer
- * funds cannot be locked by an inactive counterparty.
+ * Payments are pushed; if a transfer fails (e.g. a blocklisted recipient), the
+ * amount is credited to that same recipient in `owed` and can be withdrawn
+ * later. A failed payment never redirects funds to someone else and never
+ * blocks the milestone.
  */
-contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
+contract ArcticEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Constants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    uint256 public constant MAX_MILESTONES    = 20;
+    uint256 public constant MAX_SPLITS        = 10;
+    uint256 public constant MAX_TITLE_BYTES   = 80;
+    uint16  public constant MAX_FEE_BPS       = 100;      // 1 %
+    uint32  public constant MIN_REVIEW_PERIOD = 1 hours;
+    uint32  public constant MAX_REVIEW_PERIOD = 90 days;
+    uint64  public constant MAX_HORIZON       = 3650 days; // deadlines at most ~10 years out
+    uint256 public constant MAX_PAGE          = 100;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Types
     // ─────────────────────────────────────────────────────────────────────────
 
-    enum DealStatus      { Funded, InProgress, Completed }
-    enum MilestoneRule   { Approval, Schedule }
-    enum MilestoneState  { Pending, Delivered, Released, Refunded }
+    enum DealStatus     { Funded, InProgress, Completed }
+    enum MilestoneRule  { Approval, Schedule }
+    /// @dev Disputed is appended last so existing state indexes are unchanged.
+    enum MilestoneState { Pending, Delivered, Released, Refunded, Disputed }
 
     struct Milestone {
         uint128        amount;
-        uint128        releaseTime;   // 0 for Approval milestones
+        uint64         releaseTime;   // Schedule: earliest release; 0 for Approval
+        uint64         deliverBy;     // Approval: delivery deadline; 0 for Schedule
+        uint64         deliveredAt;   // last markDelivered timestamp
+        uint64         settledAt;     // release or refund timestamp
         MilestoneRule  rule;
         MilestoneState state;
-        uint128        releasedAt;
     }
 
     struct Split {
@@ -62,26 +71,27 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
         uint16  bps;
     }
 
-    /// @dev Fees are snapshotted at deal creation so admin changes don't affect live deals.
+    /// @dev Fee is snapshotted at creation so admin changes never affect live deals.
     struct Deal {
         address    payer;
         address    payee;
+        address    arbiter;       // address(0) = no arbiter
         uint128    total;
-        uint128    released;
-        uint128    principalRemaining;
-        uint256    shares;            // vault shares held; 0 when earnYield=false
-        bool       earnYield;
+        uint128    released;      // gross amount released to the payee side
+        uint128    refunded;      // amount refunded to the payer
         uint64     createdAt;
-        uint16     feeBps;            // snapshotted at creation
-        uint16     yieldFeeBps;       // snapshotted at creation
+        uint64     acceptedAt;    // 0 until the payee accepts
+        uint32     reviewPeriod;  // seconds the payer has to review a delivery
+        uint16     feeBps;
         DealStatus status;
     }
 
     struct MilestoneInput {
-        string         title;        // 1..80 bytes UTF-8; stored in _milestoneTitles
-        uint128        amount;
-        MilestoneRule  rule;
-        uint128        releaseTime;  // required when rule == Schedule; ignored otherwise
+        string        title;        // 1..80 bytes; only its hash is stored
+        uint128       amount;
+        MilestoneRule rule;
+        uint64        releaseTime;  // Schedule only
+        uint64        deliverBy;    // Approval only
     }
 
     struct SplitInput {
@@ -94,64 +104,66 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
     // ─────────────────────────────────────────────────────────────────────────
 
     error ZeroAddress();
+    error NotAContract();
     error InvalidFee();
     error InvalidTitle();
     error InvalidMilestones();
     error InvalidSplits();
     error InvalidAmount();
-    error InvalidReleaseTime(uint256 dealId, uint256 index);
-    error NoVault();
+    error InvalidArbiter();
+    error InvalidReviewPeriod();
+    error InvalidReleaseTime(uint256 index);
+    error InvalidDeadline(uint256 index);
+    error FundingMismatch();
     error PayeeEqualsPayer();
     error NotPayer();
     error NotPayee();
+    error NotArbiter();
+    error Unauthorized();
+    error NotAccepted(uint256 dealId);
+    error AlreadyAccepted(uint256 dealId);
+    error NotDeliverable(uint256 dealId, uint256 index);
     error NotReleasable(uint256 dealId, uint256 index);
+    error NotRefundable(uint256 dealId, uint256 index);
+    error NotDisputable(uint256 dealId, uint256 index);
+    error NotDisputed(uint256 dealId, uint256 index);
     error DealNotFound(uint256 dealId);
     error DealCompleted(uint256 dealId);
-    error VaultAssetMismatch();
+    error MilestoneNotFound(uint256 dealId, uint256 index);
+    error NothingToWithdraw();
+    error InsufficientExcess();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Events
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @dev Title emitted here; on-chain storage holds only keccak256(title) for verification.
+    /// @dev Title emitted here; storage holds only keccak256(title).
     event DealCreated(
         uint256 indexed dealId,
         address indexed payer,
         address indexed payee,
         string          title,
         uint128         total,
-        bool            earnYield
+        address         arbiter,
+        uint32          reviewPeriod
     );
+    event DealAccepted(uint256 indexed dealId);
     event MilestoneDelivered(uint256 indexed dealId, uint256 index);
-    event MilestoneReleased(
-        uint256 indexed dealId,
-        uint256         index,
-        uint128         gross,
-        uint128         fee
-    );
+    event MilestoneDisputed(uint256 indexed dealId, uint256 index);
+    event DisputeResolved(uint256 indexed dealId, uint256 index, bool releasedToPayee);
+    event MilestoneReleased(uint256 indexed dealId, uint256 index, uint128 gross, uint128 fee);
+    event MilestoneRefunded(uint256 indexed dealId, uint256 index, uint128 amount);
     event SplitPaid(
         uint256 indexed dealId,
         uint256         milestoneIndex,
         address indexed recipient,
         uint128         amount
     );
-    /// @dev Emitted when a split transfer fails; share rerouted to payer.
-    event SplitFailed(
-        uint256 indexed dealId,
-        uint256         milestoneIndex,
-        address indexed recipient,
-        uint128         amount
-    );
-    event YieldHarvested(
-        uint256 indexed dealId,
-        uint256         index,
-        uint128         toPayer,
-        uint128         fee,
-        uint128         shortfall
-    );
-    event MilestoneRefunded(uint256 indexed dealId, uint256 index, uint128 amount);
+    /// @dev Push transfer failed; amount credited to `recipient` in `owed`.
+    event PaymentDeferred(address indexed recipient, uint256 amount);
+    event Withdrawn(address indexed account, uint256 amount);
+    event Rescued(address indexed token, address indexed to, uint256 amount);
     event FeeBpsUpdated(uint16 bps);
-    event YieldFeeBpsUpdated(uint16 bps);
     event TreasuryUpdated(address treasury);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -159,282 +171,240 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
     // ─────────────────────────────────────────────────────────────────────────
 
     IERC20  public immutable usdc;
-    IERC4626 public immutable vault;
-    address  public treasury;
-    uint16   public feeBps;
-    uint16   public yieldFeeBps;
-    uint256  public dealCount;
+    address public treasury;
+    uint16  public feeBps;
+    uint256 public dealCount;
 
-    mapping(uint256 => Deal)       private _deals;
-    /// @dev Titles stored separately; they are immutable after creation.
-    mapping(uint256 => bytes32)    private _dealTitleHashes;
+    /// @notice USDC this contract owes to deals and to `owed` balances.
+    uint256 public liabilities;
+    /// @notice Payments that could not be pushed, claimable via withdraw().
+    mapping(address => uint256) public owed;
+
+    mapping(uint256 => Deal)        private _deals;
+    mapping(uint256 => bytes32)     private _dealTitleHashes;
     mapping(uint256 => Milestone[]) private _milestones;
     mapping(uint256 => mapping(uint256 => bytes32)) private _milestoneTitleHashes;
-    mapping(uint256 => Split[])    private _splits;
-    mapping(address => uint256[])  private _dealsByPayer;
-    mapping(address => uint256[])  private _dealsByPayee;
+    mapping(uint256 => Split[])     private _splits;
+    mapping(address => uint256[])   private _dealsByPayer;
+    mapping(address => uint256[])   private _dealsByPayee;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Constructor
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * @param _usdc       USDC ERC-20 token address.
-     * @param _vault      ERC-4626 vault address; pass address(0) to disable yield mode.
-     * @param _treasury   Fee recipient; must be non-zero.
-     * @param _feeBps     Protocol principal fee in bps (max 100 = 1 %).
-     * @param _yieldFeeBps Yield fee in bps (max 2000 = 20 %).
+     * @param _usdc     USDC ERC-20 token address.
+     * @param _treasury Fee recipient.
+     * @param _feeBps   Protocol fee in bps (max 100 = 1 %).
+     * @param _owner    Admin; should be a multisig on mainnet.
      */
-    constructor(
-        address _usdc,
-        address _vault,
-        address _treasury,
-        uint16  _feeBps,
-        uint16  _yieldFeeBps
-    ) Ownable(msg.sender) {
+    constructor(address _usdc, address _treasury, uint16 _feeBps, address _owner) Ownable(_owner) {
         if (_usdc == address(0) || _treasury == address(0)) revert ZeroAddress();
-        if (_usdc.code.length == 0) revert ZeroAddress(); // must be a deployed contract
-        if (_feeBps > 100 || _yieldFeeBps > 2000) revert InvalidFee();
+        if (_usdc.code.length == 0) revert NotAContract();
+        if (_feeBps > MAX_FEE_BPS) revert InvalidFee();
 
-        // Validate vault has USDC as its underlying asset
-        if (_vault != address(0)) {
-            if (IERC4626(_vault).asset() != _usdc) revert VaultAssetMismatch();
-        }
-
-        usdc       = IERC20(_usdc);
-        vault      = IERC4626(_vault);
-        treasury   = _treasury;
-        feeBps     = _feeBps;
-        yieldFeeBps = _yieldFeeBps;
+        usdc     = IERC20(_usdc);
+        treasury = _treasury;
+        feeBps   = _feeBps;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // createDeal
+    // Deal creation and acceptance
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
      * @notice Create and fund a new escrow deal.
-     * @param payee        Payee wallet; may not equal msg.sender or address(0).
+     * @param payee        Payee wallet; may not be msg.sender or address(0).
+     * @param arbiter      Optional dispute resolver; address(0) for none.
      * @param title        Deal title, 1-80 bytes.
-     * @param milestonesIn Milestone definitions.
-     * @param splitsIn     Payout recipients and shares (bps must sum to 10 000).
-     * @param earnYield    Deposit principal into vault for yield accrual.
-     * @return dealId      Newly created deal id.
+     * @param milestonesIn Milestone definitions (1-20).
+     * @param splitsIn     Payout recipients (1-10); bps must sum to 10 000.
+     * @param reviewPeriod Seconds the payer has to review each delivery.
      */
     function createDeal(
         address                   payee,
+        address                   arbiter,
         string           calldata title,
         MilestoneInput[] calldata milestonesIn,
         SplitInput[]     calldata splitsIn,
-        bool                      earnYield
+        uint32                    reviewPeriod
     ) external nonReentrant whenNotPaused returns (uint256 dealId) {
         if (payee == address(0)) revert ZeroAddress();
         if (payee == msg.sender) revert PayeeEqualsPayer();
+        if (arbiter != address(0) && (arbiter == msg.sender || arbiter == payee)) revert InvalidArbiter();
+        if (reviewPeriod < MIN_REVIEW_PERIOD || reviewPeriod > MAX_REVIEW_PERIOD) revert InvalidReviewPeriod();
         {
             uint256 len = bytes(title).length;
-            if (len == 0 || len > 80) revert InvalidTitle();
+            if (len == 0 || len > MAX_TITLE_BYTES) revert InvalidTitle();
         }
 
-        uint256 total = _validateInputs(milestonesIn, splitsIn, earnYield);
+        uint256 total = _validateInputs(milestonesIn, splitsIn);
 
         dealId = dealCount++;
-
-        // Fund and write deal record
-        uint256 shares = _fund(total, earnYield);
-        _writeDeal(dealId, payee, title, total, shares, earnYield);
+        _fund(total);
+        _writeDeal(dealId, payee, arbiter, title, total, reviewPeriod);
         _writeMilestones(dealId, milestonesIn);
         _writeSplits(dealId, splitsIn);
 
         _dealsByPayer[msg.sender].push(dealId);
         _dealsByPayee[payee].push(dealId);
 
-        emit DealCreated(dealId, msg.sender, payee, title, uint128(total), earnYield);
+        emit DealCreated(dealId, msg.sender, payee, title, uint128(total), arbiter, reviewPeriod);
+    }
+
+    /**
+     * @notice Payee accepts the deal terms. Locks in Schedule milestones and
+     *         stops the payer from refunding Approval milestones before `deliverBy`.
+     */
+    function acceptDeal(uint256 dealId) external {
+        Deal storage deal = _activeDeal(dealId);
+        if (msg.sender != deal.payee) revert NotPayee();
+        if (deal.acceptedAt != 0) revert AlreadyAccepted(dealId);
+        deal.acceptedAt = uint64(block.timestamp);
+        emit DealAccepted(dealId);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // markDelivered
+    // Approval flow
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * @notice Payee marks an Approval-rule milestone as delivered.
+     * @notice Payee submits an Approval milestone, or resubmits a disputed one.
+     *         Starts a fresh review period for the payer.
      */
     function markDelivered(uint256 dealId, uint256 index) external {
-        Deal storage deal = _deals[dealId];
-        if (deal.payer == address(0)) revert DealNotFound(dealId);
-        if (deal.status == DealStatus.Completed) revert DealCompleted(dealId);
+        Deal storage deal = _activeDeal(dealId);
         if (msg.sender != deal.payee) revert NotPayee();
+        if (deal.acceptedAt == 0) revert NotAccepted(dealId);
 
-        Milestone storage ms = _milestones[dealId][index];
-        if (ms.rule != MilestoneRule.Approval || ms.state != MilestoneState.Pending) {
-            revert NotReleasable(dealId, index);
-        }
-        ms.state = MilestoneState.Delivered;
+        Milestone storage ms = _milestone(dealId, index);
+        if (
+            ms.rule != MilestoneRule.Approval ||
+            (ms.state != MilestoneState.Pending && ms.state != MilestoneState.Disputed)
+        ) revert NotDeliverable(dealId, index);
+
+        ms.state       = MilestoneState.Delivered;
+        ms.deliveredAt = uint64(block.timestamp);
         emit MilestoneDelivered(dealId, index);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // releaseMilestone
-    // ─────────────────────────────────────────────────────────────────────────
+    /// @notice Payer disputes a delivered milestone during its review period.
+    function disputeMilestone(uint256 dealId, uint256 index) external {
+        Deal storage deal = _activeDeal(dealId);
+        if (msg.sender != deal.payer) revert NotPayer();
 
-    /**
-     * @notice Release a milestone and distribute payout.
-     *   Approval rule: payer only, milestone must be in Delivered state.
-     *   Schedule rule: anyone, once block.timestamp >= releaseTime.
-     */
-    function releaseMilestone(uint256 dealId, uint256 index) external nonReentrant {
-        Deal storage deal = _deals[dealId];
-        if (deal.payer == address(0)) revert DealNotFound(dealId);
-        if (deal.status == DealStatus.Completed) revert DealCompleted(dealId);
+        Milestone storage ms = _milestone(dealId, index);
+        if (
+            ms.state != MilestoneState.Delivered ||
+            block.timestamp >= uint256(ms.deliveredAt) + deal.reviewPeriod
+        ) revert NotDisputable(dealId, index);
 
-        Milestone storage ms = _milestones[dealId][index];
+        ms.state = MilestoneState.Disputed;
+        emit MilestoneDisputed(dealId, index);
+    }
 
-        if (ms.rule == MilestoneRule.Approval) {
-            if (msg.sender != deal.payer || ms.state != MilestoneState.Delivered) {
-                revert NotReleasable(dealId, index);
-            }
-        } else {
-            if (block.timestamp < ms.releaseTime) revert NotReleasable(dealId, index);
-            if (ms.state != MilestoneState.Pending && ms.state != MilestoneState.Delivered) {
-                revert NotReleasable(dealId, index);
-            }
-        }
+    /// @notice Arbiter settles a disputed milestone.
+    function resolveDispute(uint256 dealId, uint256 index, bool releaseToPayee) external nonReentrant {
+        Deal storage deal = _activeDeal(dealId);
+        if (deal.arbiter == address(0) || msg.sender != deal.arbiter) revert NotArbiter();
 
-        uint256 principal = ms.amount;
-        bool    yieldOn   = deal.earnYield && address(vault) != address(0);
+        Milestone storage ms = _milestone(dealId, index);
+        if (ms.state != MilestoneState.Disputed) revert NotDisputed(dealId, index);
 
-        uint256 effectivePrincipal = 0;
-        uint256 yieldAmount        = 0;
-        uint256 shortfall          = 0;
-
-        if (yieldOn) {
-            uint256 sharesToBurn = (deal.shares * principal) / deal.principalRemaining;
-            deal.shares            -= sharesToBurn;
-            deal.principalRemaining -= ms.amount;
-
-            uint256 redeemed = vault.redeem(sharesToBurn, address(this), address(this));
-            if (redeemed >= principal) {
-                yieldAmount        = redeemed - principal;
-                effectivePrincipal = principal;
-            } else {
-                shortfall          = principal - redeemed;
-                effectivePrincipal = redeemed;
-            }
-        } else {
-            deal.principalRemaining -= ms.amount;
-            effectivePrincipal = principal;
-        }
-
-        uint256 feeAmount = (effectivePrincipal * deal.feeBps) / 10_000;
-        uint256 net       = effectivePrincipal - feeAmount;
-
-        // Effects
-        deal.released = uint128(uint256(deal.released) + effectivePrincipal);
-        ms.state      = MilestoneState.Released;
-        ms.releasedAt = uint128(block.timestamp);
-        if (_allDone(dealId)) deal.status = DealStatus.Completed;
-        else deal.status = DealStatus.InProgress;
-
-        emit MilestoneReleased(dealId, index, uint128(effectivePrincipal), uint128(feeAmount));
-
-        // Interactions
-        if (feeAmount > 0) usdc.safeTransfer(treasury, feeAmount);
-        _distributeSplits(dealId, index, net, deal.payer);
-        _settleYield(dealId, index, deal.payer, yieldAmount, shortfall, deal.yieldFeeBps);
+        emit DisputeResolved(dealId, index, releaseToPayee);
+        if (releaseToPayee) _release(dealId, index);
+        else _refund(dealId, index);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // refundMilestone
+    // Release and refund
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
+     * @notice Release a milestone to the split recipients.
+     *   Approval, Delivered: payer any time; anyone after the review period.
+     *   Approval, Disputed:  payer only (conceding the dispute).
+     *   Schedule:            anyone, once accepted and releaseTime is reached.
+     */
+    function releaseMilestone(uint256 dealId, uint256 index) external nonReentrant {
+        Deal storage deal = _activeDeal(dealId);
+        Milestone storage ms = _milestone(dealId, index);
+        if (!_canRelease(deal, ms)) revert NotReleasable(dealId, index);
+        _release(dealId, index);
+    }
+
+    /**
      * @notice Refund a milestone to the payer.
-     *   Payee may refund Pending or Delivered milestones.
-     *   Payer may refund Pending milestones (liveness escape hatch when payee is unresponsive).
-     *   Principal + net yield (minus yield fee) is returned to payer.
+     *   Payee: Pending, Delivered or Disputed, any time.
+     *   Payer: Pending only, and only before acceptance or, for Approval
+     *          milestones, after the delivery deadline has passed.
      */
     function refundMilestone(uint256 dealId, uint256 index) external nonReentrant {
-        Deal storage deal = _deals[dealId];
-        if (deal.payer == address(0)) revert DealNotFound(dealId);
-        if (deal.status == DealStatus.Completed) revert DealCompleted(dealId);
+        Deal storage deal = _activeDeal(dealId);
+        Milestone storage ms = _milestone(dealId, index);
+        MilestoneState s = ms.state;
 
-        Milestone storage ms = _milestones[dealId][index];
-        bool isPayer = msg.sender == deal.payer;
-        bool isPayee = msg.sender == deal.payee;
-
-        if (!isPayee && !isPayer) revert NotPayee();
-
-        // Payer can only refund Pending milestones (before delivery is confirmed)
-        if (isPayer && !isPayee) {
-            if (ms.state != MilestoneState.Pending) revert NotReleasable(dealId, index);
-        } else {
-            // Payee can refund Pending or Delivered
-            if (ms.state != MilestoneState.Pending && ms.state != MilestoneState.Delivered) {
-                revert NotReleasable(dealId, index);
+        if (msg.sender == deal.payee) {
+            if (s != MilestoneState.Pending && s != MilestoneState.Delivered && s != MilestoneState.Disputed) {
+                revert NotRefundable(dealId, index);
             }
-        }
-
-        uint256 principal  = ms.amount;
-        bool    yieldOn    = deal.earnYield && address(vault) != address(0);
-        uint256 returnAmt   = 0;
-        uint256 yieldFeeAmt = 0;
-
-        if (yieldOn) {
-            uint256 sharesToBurn = (deal.shares * principal) / deal.principalRemaining;
-            deal.shares            -= sharesToBurn;
-            deal.principalRemaining -= ms.amount;
-
-            uint256 redeemed   = vault.redeem(sharesToBurn, address(this), address(this));
-            uint256 yieldAmt   = redeemed > principal ? redeemed - principal : 0;
-            uint256 baseReturn = redeemed < principal ? redeemed : principal;
-            yieldFeeAmt        = (yieldAmt * deal.yieldFeeBps) / 10_000;
-            returnAmt          = baseReturn + (yieldAmt - yieldFeeAmt);
+        } else if (msg.sender == deal.payer) {
+            bool allowed = s == MilestoneState.Pending && (
+                deal.acceptedAt == 0 ||
+                (ms.rule == MilestoneRule.Approval && block.timestamp > ms.deliverBy)
+            );
+            if (!allowed) revert NotRefundable(dealId, index);
         } else {
-            deal.principalRemaining -= ms.amount;
-            returnAmt = principal;
+            revert Unauthorized();
         }
 
-        // Effects
-        ms.state = MilestoneState.Refunded;
-        if (_allDone(dealId)) deal.status = DealStatus.Completed;
-        else deal.status = DealStatus.InProgress;
+        _refund(dealId, index);
+    }
 
-        // Interactions
-        if (yieldFeeAmt > 0) usdc.safeTransfer(treasury, yieldFeeAmt);
-        if (returnAmt   > 0) usdc.safeTransfer(deal.payer, returnAmt);
-
-        emit MilestoneRefunded(dealId, index, ms.amount);
+    /// @notice Withdraw payments that could not be pushed earlier.
+    function withdraw() external nonReentrant {
+        uint256 amount = owed[msg.sender];
+        if (amount == 0) revert NothingToWithdraw();
+        owed[msg.sender] = 0;
+        liabilities     -= amount;
+        usdc.safeTransfer(msg.sender, amount);
+        emit Withdrawn(msg.sender, amount);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Admin
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Set global protocol principal fee (applies to new deals only).
+    /// @notice Set the protocol fee (applies to new deals only).
     function setFeeBps(uint16 bps) external onlyOwner {
-        if (bps > 100) revert InvalidFee();
+        if (bps > MAX_FEE_BPS) revert InvalidFee();
         feeBps = bps;
         emit FeeBpsUpdated(bps);
     }
 
-    /// @notice Set global yield fee (applies to new deals only).
-    function setYieldFeeBps(uint16 bps) external onlyOwner {
-        if (bps > 2000) revert InvalidFee();
-        yieldFeeBps = bps;
-        emit YieldFeeBpsUpdated(bps);
-    }
-
-    /// @notice Set treasury address.
     function setTreasury(address t) external onlyOwner {
         if (t == address(0)) revert ZeroAddress();
         treasury = t;
         emit TreasuryUpdated(t);
     }
 
-    /// @notice Pause new deal creation only.
+    /// @notice Pause new deal creation only. Existing deals keep working.
     function pause() external onlyOwner   { _pause(); }
-
-    /// @notice Unpause deal creation.
     function unpause() external onlyOwner { _unpause(); }
+
+    /**
+     * @notice Recover tokens sent here by mistake. For USDC, only the balance
+     *         above `liabilities` can be recovered, so escrowed funds are untouchable.
+     */
+    function rescue(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        if (token == address(usdc)) {
+            uint256 bal = usdc.balanceOf(address(this));
+            if (bal < liabilities || amount > bal - liabilities) revert InsufficientExcess();
+        }
+        IERC20(token).safeTransfer(to, amount);
+        emit Rescued(token, to, amount);
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Views
@@ -448,7 +418,7 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
         return _milestones[dealId];
     }
 
-    function getMilestoneTitle(uint256 dealId, uint256 index) external view returns (bytes32) {
+    function getMilestoneTitleHash(uint256 dealId, uint256 index) external view returns (bytes32) {
         return _milestoneTitleHashes[dealId][index];
     }
 
@@ -460,26 +430,22 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
         return _splits[dealId];
     }
 
-    function dealsByPayer(address payer) external view returns (uint256[] memory) {
-        return _dealsByPayer[payer];
+    function dealCountByPayer(address payer) external view returns (uint256) {
+        return _dealsByPayer[payer].length;
     }
 
-    function dealsByPayee(address payee) external view returns (uint256[] memory) {
-        return _dealsByPayee[payee];
+    function dealCountByPayee(address payee) external view returns (uint256) {
+        return _dealsByPayee[payee].length;
     }
 
-    /**
-     * @notice Return pending unrealized yield for a deal (floored at 0).
-     */
-    function pendingYield(uint256 dealId) external view returns (uint256) {
-        Deal storage deal = _deals[dealId];
-        if (!deal.earnYield || address(vault) == address(0) || deal.shares == 0) return 0;
-        uint256 assets = vault.convertToAssets(deal.shares);
-        return assets > deal.principalRemaining ? assets - deal.principalRemaining : 0;
+    /// @notice Paginated deal ids for a payer (limit capped at MAX_PAGE).
+    function dealsByPayer(address payer, uint256 offset, uint256 limit) external view returns (uint256[] memory) {
+        return _page(_dealsByPayer[payer], offset, limit);
     }
 
-    function vaultAddress() external view returns (address) {
-        return address(vault);
+    /// @notice Paginated deal ids for a payee (limit capped at MAX_PAGE).
+    function dealsByPayee(address payee, uint256 offset, uint256 limit) external view returns (uint256[] memory) {
+        return _page(_dealsByPayee[payee], offset, limit);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -488,62 +454,59 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
 
     function _validateInputs(
         MilestoneInput[] calldata milestonesIn,
-        SplitInput[]     calldata splitsIn,
-        bool                      earnYield
+        SplitInput[]     calldata splitsIn
     ) internal view returns (uint256 total) {
         uint256 mLen = milestonesIn.length;
-        if (mLen == 0 || mLen > 20) revert InvalidMilestones();
+        if (mLen == 0 || mLen > MAX_MILESTONES) revert InvalidMilestones();
         uint256 sLen = splitsIn.length;
-        if (sLen == 0 || sLen > 10) revert InvalidSplits();
-        if (earnYield && address(vault) == address(0)) revert NoVault();
+        if (sLen == 0 || sLen > MAX_SPLITS) revert InvalidSplits();
 
+        uint256 horizon = block.timestamp + MAX_HORIZON;
         for (uint256 i; i < mLen; ++i) {
             MilestoneInput calldata m = milestonesIn[i];
-            { uint256 tl = bytes(m.title).length; if (tl == 0 || tl > 80) revert InvalidTitle(); }
+            { uint256 tl = bytes(m.title).length; if (tl == 0 || tl > MAX_TITLE_BYTES) revert InvalidTitle(); }
             if (m.amount == 0) revert InvalidAmount();
-            if (m.rule == MilestoneRule.Schedule && m.releaseTime <= block.timestamp) {
-                revert InvalidReleaseTime(0, i);
+            if (m.rule == MilestoneRule.Schedule) {
+                if (m.releaseTime <= block.timestamp || m.releaseTime > horizon) revert InvalidReleaseTime(i);
+            } else {
+                if (m.deliverBy <= block.timestamp || m.deliverBy > horizon) revert InvalidDeadline(i);
             }
             total += m.amount;
         }
-        if (total == 0 || total > type(uint128).max) revert InvalidAmount();
+        if (total > type(uint128).max) revert InvalidAmount();
 
         uint256 bpsSum = 0;
         for (uint256 i; i < sLen; ++i) {
-            if (splitsIn[i].recipient == address(0)) revert InvalidSplits();
+            if (splitsIn[i].recipient == address(0) || splitsIn[i].bps == 0) revert InvalidSplits();
             bpsSum += splitsIn[i].bps;
         }
         if (bpsSum != 10_000) revert InvalidSplits();
     }
 
-    function _fund(uint256 total, bool earnYield) internal returns (uint256 shares) {
+    function _fund(uint256 total) internal {
+        uint256 before = usdc.balanceOf(address(this));
         usdc.safeTransferFrom(msg.sender, address(this), total);
-        if (earnYield && address(vault) != address(0)) {
-            usdc.forceApprove(address(vault), total);
-            shares = vault.deposit(total, address(this));
-            usdc.forceApprove(address(vault), 0);
-        }
+        if (usdc.balanceOf(address(this)) - before != total) revert FundingMismatch();
+        liabilities += total;
     }
 
     function _writeDeal(
         uint256          dealId,
         address          payee,
+        address          arbiter,
         string  calldata title,
         uint256          total,
-        uint256          shares,
-        bool             earnYield
+        uint32           reviewPeriod
     ) internal {
-        Deal storage d  = _deals[dealId];
-        d.payer              = msg.sender;
-        d.payee              = payee;
-        d.total              = uint128(total);
-        d.principalRemaining = uint128(total);
-        d.shares             = shares;
-        d.earnYield          = earnYield;
-        d.createdAt          = uint64(block.timestamp);
-        d.feeBps             = feeBps;
-        d.yieldFeeBps        = yieldFeeBps;
-        d.status             = DealStatus.Funded;
+        Deal storage d   = _deals[dealId];
+        d.payer          = msg.sender;
+        d.payee          = payee;
+        d.arbiter        = arbiter;
+        d.total          = uint128(total);
+        d.createdAt      = uint64(block.timestamp);
+        d.reviewPeriod   = reviewPeriod;
+        d.feeBps         = feeBps;
+        d.status         = DealStatus.Funded;
         _dealTitleHashes[dealId] = keccak256(bytes(title));
     }
 
@@ -551,12 +514,15 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
         uint256 len = ms.length;
         for (uint256 i; i < len; ++i) {
             MilestoneInput calldata m = ms[i];
+            bool scheduled = m.rule == MilestoneRule.Schedule;
             _milestones[dealId].push(Milestone({
                 amount:      m.amount,
-                releaseTime: m.rule == MilestoneRule.Schedule ? m.releaseTime : 0,
+                releaseTime: scheduled ? m.releaseTime : 0,
+                deliverBy:   scheduled ? 0 : m.deliverBy,
+                deliveredAt: 0,
+                settledAt:   0,
                 rule:        m.rule,
-                state:       MilestoneState.Pending,
-                releasedAt:  0
+                state:       MilestoneState.Pending
             }));
             _milestoneTitleHashes[dealId][i] = keccak256(bytes(m.title));
         }
@@ -569,75 +535,121 @@ contract ArcticEscrow is Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    /**
-     * @dev Push-based split with per-recipient fallback to payer on failure.
-     *      A blocked recipient (e.g. contract that reverts on receive) cannot brick
-     *      milestone completion — their share is re-routed to the payer instead.
-     */
-    function _distributeSplits(
-        uint256 dealId,
-        uint256 milestoneIdx,
-        uint256 net,
-        address payer
-    ) internal {
+    function _canRelease(Deal storage deal, Milestone storage ms) internal view returns (bool) {
+        if (ms.rule == MilestoneRule.Schedule) {
+            return deal.acceptedAt != 0
+                && ms.state == MilestoneState.Pending
+                && block.timestamp >= ms.releaseTime;
+        }
+        if (ms.state == MilestoneState.Delivered) {
+            return msg.sender == deal.payer
+                || block.timestamp >= uint256(ms.deliveredAt) + deal.reviewPeriod;
+        }
+        if (ms.state == MilestoneState.Disputed) {
+            return msg.sender == deal.payer;
+        }
+        return false;
+    }
+
+    function _release(uint256 dealId, uint256 index) internal {
+        Deal storage deal    = _deals[dealId];
+        Milestone storage ms = _milestones[dealId][index];
+
+        uint256 gross = ms.amount;
+        uint256 fee   = (gross * deal.feeBps) / 10_000;
+        uint256 net   = gross - fee;
+
+        // Effects
+        ms.state      = MilestoneState.Released;
+        ms.settledAt  = uint64(block.timestamp);
+        deal.released = uint128(uint256(deal.released) + gross);
+        _updateStatus(dealId, deal);
+        emit MilestoneReleased(dealId, index, uint128(gross), uint128(fee));
+
+        // Interactions
+        _pay(treasury, fee);
+        _distributeSplits(dealId, index, net);
+    }
+
+    function _refund(uint256 dealId, uint256 index) internal {
+        Deal storage deal    = _deals[dealId];
+        Milestone storage ms = _milestones[dealId][index];
+        uint128 amount       = ms.amount;
+
+        // Effects
+        ms.state      = MilestoneState.Refunded;
+        ms.settledAt  = uint64(block.timestamp);
+        deal.refunded = deal.refunded + amount;
+        _updateStatus(dealId, deal);
+        emit MilestoneRefunded(dealId, index, amount);
+
+        // Interactions
+        _pay(deal.payer, amount);
+    }
+
+    function _distributeSplits(uint256 dealId, uint256 milestoneIdx, uint256 net) internal {
         Split[] storage ss = _splits[dealId];
-        uint256 len = ss.length;
+        uint256 len   = ss.length;
         uint256 accum = 0;
-        for (uint256 i; i + 1 < len; ++i) {
-            uint256 share = (net * ss[i].bps) / 10_000;
+        for (uint256 i; i < len; ++i) {
+            // The last recipient takes the rounding remainder
+            uint256 share = i + 1 == len ? net - accum : (net * ss[i].bps) / 10_000;
             accum += share;
-            _sendOrFallback(dealId, milestoneIdx, ss[i].recipient, share, payer);
+            if (share == 0) continue;
+            _pay(ss[i].recipient, share);
+            emit SplitPaid(dealId, milestoneIdx, ss[i].recipient, uint128(share));
         }
-        uint256 lastShare = net - accum;
-        _sendOrFallback(dealId, milestoneIdx, ss[len - 1].recipient, lastShare, payer);
     }
 
-    function _sendOrFallback(
-        uint256 dealId,
-        uint256 milestoneIdx,
-        address recipient,
-        uint256 amount,
-        address payer
-    ) internal {
+    /**
+     * @dev Push `amount` to `to`. On failure, credit it to `to` in `owed`
+     *      instead of reverting, so one bad recipient cannot block a milestone
+     *      and funds are never redirected to anyone else.
+     */
+    function _pay(address to, uint256 amount) internal {
         if (amount == 0) return;
-        bytes memory data = abi.encodeCall(IERC20.transfer, (recipient, amount));
-        (bool ok, bytes memory ret) = address(usdc).call(data);
-        bool success = ok && (ret.length == 0 || abi.decode(ret, (bool)));
+        (bool ok, bytes memory ret) = address(usdc).call(abi.encodeCall(IERC20.transfer, (to, amount)));
+        bool success = ok && (ret.length == 0 || (ret.length >= 32 && abi.decode(ret, (uint256)) == 1));
         if (success) {
-            emit SplitPaid(dealId, milestoneIdx, recipient, uint128(amount));
+            liabilities -= amount;
         } else {
-            // Reroute to payer and record failure
-            usdc.safeTransfer(payer, amount);
-            emit SplitFailed(dealId, milestoneIdx, recipient, uint128(amount));
+            owed[to] += amount;
+            emit PaymentDeferred(to, amount);
         }
     }
 
-    function _settleYield(
-        uint256 dealId,
-        uint256 milestoneIdx,
-        address payer,
-        uint256 yieldAmount,
-        uint256 shortfall,
-        uint256 yfBps
-    ) internal {
-        if (yieldAmount > 0) {
-            uint256 yieldFee = (yieldAmount * yfBps) / 10_000;
-            uint256 yieldNet = yieldAmount - yieldFee;
-            if (yieldFee > 0) usdc.safeTransfer(treasury, yieldFee);
-            if (yieldNet > 0) usdc.safeTransfer(payer, yieldNet);
-            emit YieldHarvested(dealId, milestoneIdx, uint128(yieldNet), uint128(yieldFee), 0);
-        } else if (shortfall > 0) {
-            emit YieldHarvested(dealId, milestoneIdx, 0, 0, uint128(shortfall));
-        }
-    }
-
-    function _allDone(uint256 dealId) internal view returns (bool) {
+    function _updateStatus(uint256 dealId, Deal storage deal) internal {
         Milestone[] storage ms = _milestones[dealId];
         uint256 len = ms.length;
         for (uint256 i; i < len; ++i) {
             MilestoneState s = ms[i].state;
-            if (s != MilestoneState.Released && s != MilestoneState.Refunded) return false;
+            if (s != MilestoneState.Released && s != MilestoneState.Refunded) {
+                deal.status = DealStatus.InProgress;
+                return;
+            }
         }
-        return true;
+        deal.status = DealStatus.Completed;
+    }
+
+    function _activeDeal(uint256 dealId) internal view returns (Deal storage deal) {
+        deal = _deals[dealId];
+        if (deal.payer == address(0)) revert DealNotFound(dealId);
+        if (deal.status == DealStatus.Completed) revert DealCompleted(dealId);
+    }
+
+    function _milestone(uint256 dealId, uint256 index) internal view returns (Milestone storage) {
+        Milestone[] storage list = _milestones[dealId];
+        if (index >= list.length) revert MilestoneNotFound(dealId, index);
+        return list[index];
+    }
+
+    function _page(uint256[] storage ids, uint256 offset, uint256 limit) internal view returns (uint256[] memory out) {
+        uint256 len = ids.length;
+        if (offset >= len) return new uint256[](0);
+        if (limit > MAX_PAGE) limit = MAX_PAGE;
+        uint256 end = offset + limit;
+        if (end > len) end = len;
+        out = new uint256[](end - offset);
+        for (uint256 i; i < out.length; ++i) out[i] = ids[offset + i];
     }
 }

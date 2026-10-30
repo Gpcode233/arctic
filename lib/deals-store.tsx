@@ -1,15 +1,12 @@
 "use client"
 
 /**
- * Onchain deals store — reads directly from ArcticEscrow via wagmi hooks.
+ * Onchain deals store — reads directly from ArcticEscrow (v2) via wagmi hooks.
  * Falls back gracefully when CONTRACT_ADDRESS is not configured.
- *
- * Keeps the same public API surface as the old localStorage store so all
- * pages continue to compile without changes until Phase 4 wires them.
  */
 
 import * as React from "react"
-import { parseUnits, formatUnits, type Address } from "viem"
+import { parseUnits, formatUnits, zeroAddress, type Address } from "viem"
 import {
   useAccount,
   useReadContract,
@@ -23,7 +20,6 @@ import {
   CONTRACT_ADDRESS,
   USDC_ADDRESS,
   USDC_DECIMALS,
-  YIELD_ENABLED,
 } from "@/lib/arc"
 import type {
   ActivityEvent,
@@ -38,6 +34,8 @@ import type { Abi, PublicClient } from "viem"
 // Cast to Abi so wagmi hooks accept it without "string not assignable to 'function'" errors
 const ESCROW_ABI = ESCROW_ABI_JSON as unknown as Abi
 
+/** Max ids the contract returns per dealsByPayer / dealsByPayee page. */
+const PAGE_SIZE = 100n
 
 /**
  * Poll for a receipt directly. viem's waitForTransactionReceipt times out in the
@@ -59,6 +57,11 @@ async function waitForReceipt(client: PublicClient, hash: `0x${string}`, timeout
   throw new Error("Still waiting for confirmation. Check the explorer for the transaction.")
 }
 
+function readableError(err: unknown, fallback: string): Error {
+  const e = err as { shortMessage?: string; message?: string }
+  return new Error(e.shortMessage ?? e.message ?? fallback)
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Types for form inputs
 // ─────────────────────────────────────────────────────────────────────────
@@ -66,17 +69,35 @@ async function waitForReceipt(client: PublicClient, hash: `0x${string}`, timeout
 export type NewDealInput = {
   title: string
   payee: Party
-  milestones: Pick<Milestone, "title" | "amount" | "rule" | "dueAt">[]
+  arbiter: Party
+  /** Seconds the payer has to review each delivery. */
+  reviewPeriod: number
+  milestones: Pick<Milestone, "title" | "amount" | "rule" | "dueAt" | "deliverBy">[]
   splits: SplitShare[]
-  earnYield?: boolean
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
+type RawDeal = {
+  payer: Address; payee: Address; arbiter: Address
+  total: bigint; released: bigint; refunded: bigint
+  createdAt: bigint; acceptedAt: bigint; reviewPeriod: number
+  feeBps: number; status: number
+}
+
+type RawMilestone = {
+  amount: bigint; releaseTime: bigint; deliverBy: bigint
+  deliveredAt: bigint; settledAt: bigint; rule: number; state: number
+}
+
 function usdcWhole(raw: bigint): number {
   return Number(formatUnits(raw, USDC_DECIMALS))
+}
+
+function isoOrUndefined(sec: bigint): string | undefined {
+  return sec > 0n ? new Date(Number(sec) * 1000).toISOString() : undefined
 }
 
 function statusFromContract(s: number): Deal["status"] {
@@ -90,12 +111,31 @@ function msStatusFromContract(s: number): MilestoneStatus {
     case 1: return "submitted"
     case 2: return "released"
     case 3: return "refunded"
+    case 4: return "disputed"
     default: return "pending"
   }
 }
 
 function msRuleFromContract(r: number): Milestone["rule"] {
   return r === 1 ? "schedule" : "approval"
+}
+
+function dealFromContract(id: bigint, d: RawDeal): Omit<Deal, "milestones" | "splits"> {
+  return {
+    id: String(id),
+    title: `Deal #${String(id)}`,   // title is only emitted in DealCreated
+    payer: { address: d.payer },
+    payee: { address: d.payee },
+    arbiter: d.arbiter !== zeroAddress ? { address: d.arbiter } : undefined,
+    total: usdcWhole(d.total),
+    released: usdcWhole(d.released),
+    refunded: usdcWhole(d.refunded),
+    status: statusFromContract(d.status),
+    createdAt: new Date(Number(d.createdAt) * 1000).toISOString(),
+    acceptedAt: isoOrUndefined(d.acceptedAt),
+    reviewPeriod: Number(d.reviewPeriod),
+    feeBps: d.feeBps,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -108,13 +148,14 @@ export function useDealById(dealId: bigint | undefined): {
   refetch: () => void
 } {
   const escrow = CONTRACT_ADDRESS as Address | undefined
+  const enabled = !!escrow && dealId !== undefined
 
   const { data: dealRaw, isLoading: l1, refetch: r1 } = useReadContract({
     address: escrow,
     abi: ESCROW_ABI,
     functionName: "getDeal",
     args: [dealId],
-    query: { enabled: !!escrow && dealId !== undefined },
+    query: { enabled },
   })
 
   const { data: msRaw, isLoading: l2, refetch: r2 } = useReadContract({
@@ -122,7 +163,7 @@ export function useDealById(dealId: bigint | undefined): {
     abi: ESCROW_ABI,
     functionName: "getMilestones",
     args: [dealId],
-    query: { enabled: !!escrow && dealId !== undefined },
+    query: { enabled },
   })
 
   const { data: splitsRaw, isLoading: l3, refetch: r3 } = useReadContract({
@@ -130,56 +171,31 @@ export function useDealById(dealId: bigint | undefined): {
     abi: ESCROW_ABI,
     functionName: "getSplits",
     args: [dealId],
-    query: { enabled: !!escrow && dealId !== undefined },
-  })
-
-  const { data: yieldRaw } = useReadContract({
-    address: escrow,
-    abi: ESCROW_ABI,
-    functionName: "pendingYield",
-    args: [dealId],
-    query: { enabled: !!escrow && dealId !== undefined && YIELD_ENABLED },
+    query: { enabled },
   })
 
   const deal = React.useMemo(() => {
-    if (!dealRaw || !msRaw || !splitsRaw) return undefined
-    const d = dealRaw as {
-      payer: Address; payee: Address; total: bigint; released: bigint;
-      principalRemaining: bigint; shares: bigint; earnYield: boolean;
-      createdAt: bigint; feeBps: number; yieldFeeBps: number; status: number
-    }
-    const milestones: Milestone[] = (msRaw as Array<{
-      amount: bigint; releaseTime: bigint; rule: number; state: number; releasedAt: bigint
-    }>).map((m, i) => ({
+    if (!dealRaw || !msRaw || !splitsRaw || dealId === undefined) return undefined
+    const d = dealRaw as RawDeal
+    if (d.payer === zeroAddress) return undefined
+    const milestones: Milestone[] = (msRaw as RawMilestone[]).map((m, i) => ({
       id: `${String(dealId)}-${i}`,
       title: `Milestone ${i + 1}`,   // titles not stored onchain; show index
       amount: usdcWhole(m.amount),
       rule: msRuleFromContract(m.rule),
       status: msStatusFromContract(m.state),
-      dueAt: m.releaseTime > 0n ? new Date(Number(m.releaseTime) * 1000).toISOString() : undefined,
-      releasedAt: m.releasedAt > 0n ? new Date(Number(m.releasedAt) * 1000).toISOString() : undefined,
+      dueAt: isoOrUndefined(m.releaseTime),
+      deliverBy: isoOrUndefined(m.deliverBy),
+      deliveredAt: isoOrUndefined(m.deliveredAt),
+      releasedAt: isoOrUndefined(m.settledAt),
     }))
     const splits: SplitShare[] = (splitsRaw as Array<{ recipient: Address; bps: number }>).map((s) => ({
       recipient: s.recipient,
       address: s.recipient,
       bps: s.bps,
     }))
-    return {
-      id: String(dealId),
-      title: `Deal #${String(dealId)}`,   // title not stored onchain
-      payer: { address: d.payer },
-      payee: { address: d.payee },
-      total: usdcWhole(d.total),
-      released: usdcWhole(d.released),
-      status: statusFromContract(d.status),
-      createdAt: new Date(Number(d.createdAt) * 1000).toISOString(),
-      milestones,
-      splits,
-      earnYield: d.earnYield,
-      yieldEarned: yieldRaw !== undefined ? usdcWhole(yieldRaw as bigint) : undefined,
-      feeBps: d.feeBps,
-    } satisfies Deal
-  }, [dealRaw, msRaw, splitsRaw, yieldRaw, dealId])
+    return { ...dealFromContract(dealId, d), milestones, splits } satisfies Deal
+  }, [dealRaw, msRaw, splitsRaw, dealId])
 
   return {
     deal,
@@ -192,6 +208,14 @@ export function useDealById(dealId: bigint | undefined): {
 // Read hook: all deals for connected wallet
 // ─────────────────────────────────────────────────────────────────────────
 
+function pageCalls(escrow: Address, fn: "dealsByPayer" | "dealsByPayee", who: Address, count: bigint) {
+  const calls = []
+  for (let offset = 0n; offset < count; offset += PAGE_SIZE) {
+    calls.push({ address: escrow, abi: ESCROW_ABI, functionName: fn, args: [who, offset, PAGE_SIZE] as const })
+  }
+  return calls
+}
+
 export function useDeals(): {
   deals: Deal[]
   activity: ActivityEvent[]
@@ -201,29 +225,37 @@ export function useDeals(): {
   const { address } = useAccount()
   const escrow = CONTRACT_ADDRESS as Address | undefined
 
-  const { data: payerIds, refetch: rp } = useReadContract({
-    address: escrow,
-    abi: ESCROW_ABI,
-    functionName: "dealsByPayer",
-    args: [address],
+  const { data: counts, refetch: rc } = useReadContracts({
+    contracts: escrow && address
+      ? [
+          { address: escrow, abi: ESCROW_ABI, functionName: "dealCountByPayer", args: [address] },
+          { address: escrow, abi: ESCROW_ABI, functionName: "dealCountByPayee", args: [address] },
+        ]
+      : [],
     query: { enabled: !!escrow && !!address },
   })
 
-  const { data: payeeIds, refetch: re } = useReadContract({
-    address: escrow,
-    abi: ESCROW_ABI,
-    functionName: "dealsByPayee",
-    args: [address],
-    query: { enabled: !!escrow && !!address },
+  const idCalls = React.useMemo(() => {
+    if (!escrow || !address || !counts) return []
+    const payerCount = (counts[0]?.result as bigint | undefined) ?? 0n
+    const payeeCount = (counts[1]?.result as bigint | undefined) ?? 0n
+    return [
+      ...pageCalls(escrow, "dealsByPayer", address, payerCount),
+      ...pageCalls(escrow, "dealsByPayee", address, payeeCount),
+    ]
+  }, [escrow, address, counts])
+
+  const { data: idPages, refetch: ri } = useReadContracts({
+    contracts: idCalls,
+    query: { enabled: idCalls.length > 0 },
   })
 
   // Merge and dedupe deal ids
   const allIds = React.useMemo(() => {
     const ids = new Set<bigint>()
-    ;(payerIds as bigint[] | undefined)?.forEach((id) => ids.add(id))
-    ;(payeeIds as bigint[] | undefined)?.forEach((id) => ids.add(id))
+    idPages?.forEach((page) => (page.result as bigint[] | undefined)?.forEach((id) => ids.add(id)))
     return [...ids]
-  }, [payerIds, payeeIds])
+  }, [idPages])
 
   // Batch read all deal headers
   const dealContracts = React.useMemo(() =>
@@ -245,24 +277,10 @@ export function useDeals(): {
     if (!dealsRaw) return []
     return dealsRaw.flatMap((res, i) => {
       if (res.status !== "success") return []
-      const d = res.result as {
-        payer: Address; payee: Address; total: bigint; released: bigint;
-        createdAt: bigint; feeBps: number; earnYield: boolean; status: number
-      }
-      const id = allIds[i]
       return [{
-        id: String(id),
-        title: `Deal #${String(id)}`,
-        payer: { address: d.payer },
-        payee: { address: d.payee },
-        total: usdcWhole(d.total),
-        released: usdcWhole(d.released),
-        status: statusFromContract(d.status),
-        createdAt: new Date(Number(d.createdAt) * 1000).toISOString(),
+        ...dealFromContract(allIds[i], res.result as RawDeal),
         milestones: [],   // loaded lazily in deal detail page
         splits: [],
-        earnYield: d.earnYield,
-        feeBps: d.feeBps,
       } satisfies Deal]
     })
   }, [dealsRaw, allIds])
@@ -271,8 +289,22 @@ export function useDeals(): {
     deals,
     activity: [],    // activity feed from events — implemented via logs in detail page
     isLoading: isLoading && allIds.length > 0,
-    refetch: () => { void rp(); void re(); void rd() },
+    refetch: () => { void rc(); void ri(); void rd() },
   }
+}
+
+/** USDC credited to the connected wallet after a failed push payment. */
+export function useOwed(): { owed: number; refetch: () => void } {
+  const { address } = useAccount()
+  const escrow = CONTRACT_ADDRESS as Address | undefined
+  const { data, refetch } = useReadContract({
+    address: escrow,
+    abi: ESCROW_ABI,
+    functionName: "owed",
+    args: [address],
+    query: { enabled: !!escrow && !!address },
+  })
+  return { owed: data !== undefined ? usdcWhole(data as bigint) : 0, refetch: () => void refetch() }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -280,6 +312,8 @@ export function useDeals(): {
 // ─────────────────────────────────────────────────────────────────────────
 
 export type CreateStep = "idle" | "approve" | "approving" | "create" | "confirming"
+
+const toSec = (iso: string) => BigInt(Math.floor(new Date(iso).getTime() / 1000))
 
 /** Approve USDC spend then create deal in one flow. */
 export function useCreateDeal() {
@@ -299,10 +333,41 @@ export function useCreateDeal() {
 
     setIsPending(true)
     try {
-      const totalWhole = input.milestones.reduce((sum, m) => sum + m.amount, 0)
-      const totalRaw = parseUnits(String(totalWhole), USDC_DECIMALS)
+      // Step 1: build milestone and split structs (validate before any wallet prompt)
+      const nowSec = Math.floor(Date.now() / 1000)
+      const milestonesIn = input.milestones.map((m, i) => {
+        const scheduled = m.rule === "schedule"
+        const when = scheduled ? m.dueAt : m.deliverBy
+        if (!when) throw new Error(`Milestone ${i + 1} needs a ${scheduled ? "release" : "delivery"} date`)
+        const ts = toSec(when)
+        // Contract rejects times <= block.timestamp; keep a 5 min buffer for wallet lag
+        if (ts <= BigInt(nowSec + 300)) {
+          throw new Error(`Milestone ${i + 1} date must be at least 5 minutes in the future.`)
+        }
+        return {
+          title: m.title,
+          amount: parseUnits(String(m.amount), USDC_DECIMALS),
+          rule: scheduled ? 1 : 0,
+          releaseTime: scheduled ? ts : 0n,
+          deliverBy: scheduled ? 0n : ts,
+        }
+      })
+      const totalRaw = milestonesIn.reduce((sum, m) => sum + m.amount, 0n)
 
-      // Step 1: approve USDC (skipped when existing allowance already covers the deal)
+      const effectiveSplits = input.splits.length > 0
+        ? input.splits.map((s) => ({ recipient: s.address as Address, bps: s.bps }))
+        : [{ recipient: input.payee.address as Address, bps: 10000 }]
+
+      const createArgs = [
+        input.payee.address as Address,
+        input.arbiter.address as Address,
+        input.title,
+        milestonesIn,
+        effectiveSplits,
+        input.reviewPeriod,
+      ] as const
+
+      // Step 2: approve USDC (skipped when existing allowance already covers the deal)
       const allowance = await client
         .readContract({
           address: USDC_ADDRESS as Address,
@@ -323,43 +388,7 @@ export function useCreateDeal() {
         await waitForReceipt(client, approveTx)
       }
 
-      // Step 2: build milestone and split structs
-      const nowSec = Math.floor(Date.now() / 1000)
-      const milestonesIn = input.milestones.map((m, i) => {
-        let releaseTime = 0n
-        if (m.rule === "schedule" && m.dueAt) {
-          const ts = Math.floor(new Date(m.dueAt).getTime() / 1000)
-          // Guard: contract rejects releaseTime <= block.timestamp; add 5 min buffer
-          if (ts <= nowSec + 300) {
-            throw new Error(
-              `Milestone ${i + 1} release time must be at least 5 minutes in the future. ` +
-              `Please set a later date and try again.`
-            )
-          }
-          releaseTime = BigInt(ts)
-        }
-        return {
-          title: m.title,
-          amount: parseUnits(String(m.amount), USDC_DECIMALS),
-          rule: m.rule === "schedule" ? 1 : 0,
-          releaseTime,
-        }
-      })
-
-      const effectiveSplits = input.splits.length > 0
-        ? input.splits.map((s) => ({ recipient: s.address as Address, bps: s.bps }))
-        : [{ recipient: input.payee.address as Address, bps: 10000 }]
-
-      // Step 3: createDeal
-      const createArgs = [
-        input.payee.address as Address,
-        input.title,
-        milestonesIn,
-        effectiveSplits,
-        input.earnYield ?? false,
-      ] as const
-
-      // Simulate first so a revert surfaces as a readable error, not a silent wallet failure
+      // Step 3: simulate first so a revert surfaces as a readable error, not a silent wallet failure
       try {
         await client.simulateContract({
           account: address,
@@ -369,8 +398,7 @@ export function useCreateDeal() {
           args: createArgs,
         })
       } catch (err) {
-        const e = err as { shortMessage?: string; message?: string }
-        throw new Error(e.shortMessage ?? e.message ?? "createDeal would revert")
+        throw readableError(err, "createDeal would revert")
       }
 
       setStep("create")
@@ -406,83 +434,65 @@ export function useCreateDeal() {
   return { createDeal, isPending, step, txHash }
 }
 
-export function useMarkDelivered(dealId: bigint | undefined) {
+type EscrowAction =
+  | "acceptDeal"
+  | "markDelivered"
+  | "disputeMilestone"
+  | "releaseMilestone"
+  | "refundMilestone"
+  | "resolveDispute"
+  | "withdraw"
+
+/** Simulate, send and confirm a single escrow call. */
+function useEscrowWrite() {
   const { writeContractAsync } = useWriteContract()
   const client = usePublicClient()
+  const { address } = useAccount()
   const escrow = CONTRACT_ADDRESS as Address | undefined
+  const [pending, setPending] = React.useState<EscrowAction | undefined>()
 
-  const [isPending, setIsPending] = React.useState(false)
-
-  async function markDelivered(index: number) {
-    if (!escrow || dealId === undefined) throw new Error("No contract or deal")
-    setIsPending(true)
+  async function send(functionName: EscrowAction, args: readonly unknown[]) {
+    if (!escrow || !client) throw new Error("No contract configured")
+    if (!address) throw new Error("Wallet not connected")
+    setPending(functionName)
     try {
-      const hash = await writeContractAsync({
-        address: escrow,
-        abi: ESCROW_ABI,
-        functionName: "markDelivered",
-        args: [dealId, BigInt(index)],
-      })
-      await waitForReceipt(client!, hash)
+      try {
+        await client.simulateContract({ account: address, address: escrow, abi: ESCROW_ABI, functionName, args })
+      } catch (err) {
+        throw readableError(err, `${functionName} would revert`)
+      }
+      const hash = await writeContractAsync({ address: escrow, abi: ESCROW_ABI, functionName, args })
+      await waitForReceipt(client, hash)
       return hash
     } finally {
-      setIsPending(false)
+      setPending(undefined)
     }
   }
 
-  return { markDelivered, isPending }
+  return { send, pending }
 }
 
-export function useReleaseMilestone(dealId: bigint | undefined) {
-  const { writeContractAsync } = useWriteContract()
-  const client = usePublicClient()
-  const escrow = CONTRACT_ADDRESS as Address | undefined
-
-  const [isPending, setIsPending] = React.useState(false)
-
-  async function releaseMilestone(index: number) {
-    if (!escrow || dealId === undefined) throw new Error("No contract or deal")
-    setIsPending(true)
-    try {
-      const hash = await writeContractAsync({
-        address: escrow,
-        abi: ESCROW_ABI,
-        functionName: "releaseMilestone",
-        args: [dealId, BigInt(index)],
-      })
-      await waitForReceipt(client!, hash)
-      return hash
-    } finally {
-      setIsPending(false)
-    }
+/** All actions on one deal. `pending` names the call in flight, if any. */
+export function useDealActions(dealId: bigint | undefined) {
+  const { send, pending } = useEscrowWrite()
+  const need = () => {
+    if (dealId === undefined) throw new Error("No deal")
+    return dealId
   }
-
-  return { releaseMilestone, isPending }
+  return {
+    pending,
+    acceptDeal: () => send("acceptDeal", [need()]),
+    markDelivered: (i: number) => send("markDelivered", [need(), BigInt(i)]),
+    disputeMilestone: (i: number) => send("disputeMilestone", [need(), BigInt(i)]),
+    releaseMilestone: (i: number) => send("releaseMilestone", [need(), BigInt(i)]),
+    refundMilestone: (i: number) => send("refundMilestone", [need(), BigInt(i)]),
+    resolveDispute: (i: number, releaseToPayee: boolean) =>
+      send("resolveDispute", [need(), BigInt(i), releaseToPayee]),
+  }
 }
 
-export function useRefundMilestone(dealId: bigint | undefined) {
-  const { writeContractAsync } = useWriteContract()
-  const client = usePublicClient()
-  const escrow = CONTRACT_ADDRESS as Address | undefined
-
-  const [isPending, setIsPending] = React.useState(false)
-
-  async function refundMilestone(index: number) {
-    if (!escrow || dealId === undefined) throw new Error("No contract or deal")
-    setIsPending(true)
-    try {
-      const hash = await writeContractAsync({
-        address: escrow,
-        abi: ESCROW_ABI,
-        functionName: "refundMilestone",
-        args: [dealId, BigInt(index)],
-      })
-      await waitForReceipt(client!, hash)
-      return hash
-    } finally {
-      setIsPending(false)
-    }
-  }
-
-  return { refundMilestone, isPending }
+/** Withdraw USDC credited to the connected wallet in `owed`. */
+export function useWithdraw() {
+  const { send, pending } = useEscrowWrite()
+  return { withdraw: () => send("withdraw", []), isPending: pending === "withdraw" }
 }

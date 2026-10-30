@@ -4,36 +4,59 @@ import * as React from "react"
 import { useRouter } from "next/navigation"
 import {
   Cancel01Icon,
+  CheckmarkCircle02Icon,
   Loading03Icon,
+  Mail01Icon,
   PlusSignIcon,
 } from "@hugeicons/core-free-icons"
 import { toast } from "sonner"
+import { useAccount } from "wagmi"
 
 import { Icon } from "@/components/arctic/icon"
 import { PageHeader } from "@/components/arctic/page-header"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { useCreateDeal } from "@/lib/deals-store"
 import { explorerTx, usdc } from "@/lib/format"
 import { isAddress, protocolFeeBps } from "@/lib/config"
-import { isEmail, saveShare, type ShareRecipient } from "@/lib/share"
+import { isEmail, mailtoFor, saveShare, type ShareRecipient } from "@/lib/share"
 import {
   buildVesting,
   frequencyAllowed,
   releaseCount,
+  toLocalInput,
   type VestingDuration,
   type VestingFrequency,
 } from "@/lib/vesting"
-import { YIELD_ENABLED } from "@/lib/arc"
+import { CHAIN_ID } from "@/lib/arc"
 import type { ReleaseRule } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-type MilestoneDraft = { title: string; amount: string; rule: ReleaseRule; dueAt: string }
+type MilestoneDraft = { title: string; amount: string; rule: ReleaseRule; dueAt: string; deliverBy: string }
 type SplitDraft = { recipient: string; email: string; address: string; pct: string }
+type ArbiterDraft = { name: string; email: string; address: string }
 
 const rules: { value: ReleaseRule; label: string; hint: string }[] = [
-  { value: "approval", label: "Approval", hint: "Payer releases" },
+  { value: "approval", label: "Approval", hint: "Payee delivers, payer reviews" },
   { value: "schedule", label: "Schedule", hint: "Releases on a date" },
+]
+
+const HOUR = 3600
+const DAY = 24 * HOUR
+const reviewOptions: { seconds: number; label: string }[] = [
+  ...(CHAIN_ID !== 5042 ? [{ seconds: HOUR, label: "1 hour" }] : []),
+  { seconds: DAY, label: "1 day" },
+  { seconds: 3 * DAY, label: "3 days" },
+  { seconds: 7 * DAY, label: "7 days" },
+  { seconds: 14 * DAY, label: "14 days" },
 ]
 
 const walletPrompt: Partial<Record<string, string>> = {
@@ -76,28 +99,35 @@ function FundLabel({ step, isPending }: { step: string; isPending: boolean }) {
   )
 }
 
-// Scheduled releases must be at least 5 minutes in the future to survive wallet confirmation lag.
-const SCHEDULE_BUFFER_MS = 5 * 60 * 1_000
-const scheduleOk = (dueAt: string) => !!dueAt && new Date(dueAt).getTime() > Date.now() + SCHEDULE_BUFFER_MS
+// Onchain dates must be at least 5 minutes in the future to survive wallet confirmation lag.
+const DATE_BUFFER_MS = 5 * 60 * 1_000
+const dateOk = (value: string) => !!value && new Date(value).getTime() > Date.now() + DATE_BUFFER_MS
+const defaultDeliverBy = () => toLocalInput(new Date(Date.now() + 30 * DAY * 1000))
+const emptyMilestone = (): MilestoneDraft => ({
+  title: "", amount: "", rule: "approval", dueAt: "", deliverBy: defaultDeliverBy(),
+})
 
 const label = "text-xs font-medium text-muted-foreground"
 
 export default function NewDealPage() {
   const router = useRouter()
-  const { createDeal, isPending, step } = useCreateDeal()
+  const { address: connected } = useAccount()
+  const { createDeal, isPending, step, txHash } = useCreateDeal()
 
   const [title, setTitle] = React.useState("")
   const [payeeName, setPayeeName] = React.useState("")
   const [payeeEmail, setPayeeEmail] = React.useState("")
   const [payeeAddress, setPayeeAddress] = React.useState("")
-  const [milestones, setMilestones] = React.useState<MilestoneDraft[]>([
-    { title: "", amount: "", rule: "approval", dueAt: "" },
-  ])
+  const [milestones, setMilestones] = React.useState<MilestoneDraft[]>(() => [emptyMilestone()])
   const [splits, setSplits] = React.useState<SplitDraft[]>([])
+  const [reviewPeriod, setReviewPeriod] = React.useState(7 * DAY)
   const [vestTotal, setVestTotal] = React.useState("")
   const [vestMonths, setVestMonths] = React.useState<VestingDuration>(12)
   const [vestFreq, setVestFreq] = React.useState<VestingFrequency>("monthly")
-  const [earnYield, setEarnYield] = React.useState(false)
+
+  const [arbiterOpen, setArbiterOpen] = React.useState(false)
+  const [arbiter, setArbiter] = React.useState<ArbiterDraft>({ name: "", email: "", address: "" })
+  const [created, setCreated] = React.useState<{ dealId: string; arbiter: ShareRecipient } | undefined>()
 
   const total = milestones.reduce((sum, m) => sum + (Number(m.amount) || 0), 0)
   const fee = (total * protocolFeeBps) / 10_000
@@ -116,9 +146,23 @@ export default function NewDealPage() {
     isAddress(payeeAddress.trim()) &&
     total > 0 &&
     milestones.every((m) => m.title.trim() && Number(m.amount) > 0) &&
-    milestones.every((m) => m.rule !== "schedule" || scheduleOk(m.dueAt)) &&
+    milestones.every((m) => dateOk(m.rule === "schedule" ? m.dueAt : m.deliverBy)) &&
     splitOk &&
     emailsOk
+
+  // The arbiter must be a third party: not the payer, payee or a split recipient.
+  const arbiterAddr = arbiter.address.trim().toLowerCase()
+  const arbiterConflict =
+    isAddress(arbiterAddr) &&
+    [connected ?? "", payeeAddress.trim()].some((a) => a.toLowerCase() === arbiterAddr)
+  const arbiterSplitConflict =
+    isAddress(arbiterAddr) && splits.some((s) => s.address.trim().toLowerCase() === arbiterAddr)
+  const arbiterOk =
+    !!arbiter.name.trim() &&
+    isEmail(arbiter.email.trim()) &&
+    isAddress(arbiterAddr) &&
+    !arbiterConflict &&
+    !arbiterSplitConflict
 
   const vestTotalNum = Number(vestTotal) || 0
   const vestCount = releaseCount(vestMonths, vestFreq)
@@ -132,34 +176,55 @@ export default function NewDealPage() {
   function applyVesting() {
     if (vestTotalNum <= 0) return
     const rows = buildVesting(vestTotalNum, vestMonths, vestFreq, new Date())
-    setMilestones(rows.map((r) => ({ ...r, rule: "schedule" as const })))
+    setMilestones(rows.map((r) => ({ ...r, rule: "schedule" as const, deliverBy: "" })))
     toast.success("Vesting schedule applied", {
       description: `${rows.length} releases over ${vestMonths} months. Edit anything below.`,
     })
   }
 
   function updateMilestone(i: number, patch: Partial<MilestoneDraft>) {
-    setMilestones((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
+    setMilestones((prev) =>
+      prev.map((m, idx) => {
+        if (idx !== i) return m
+        const next = { ...m, ...patch }
+        // Switching a vesting row back to approval needs a delivery deadline
+        if (next.rule === "approval" && !next.deliverBy) next.deliverBy = defaultDeliverBy()
+        return next
+      }),
+    )
   }
 
   function updateSplit(i: number, patch: Partial<SplitDraft>) {
     setSplits((prev) => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
   }
 
-  async function submit(e: React.FormEvent) {
+  function openArbiter(e: React.FormEvent) {
     e.preventDefault()
-    if (!valid) return
+    if (valid) setArbiterOpen(true)
+  }
+
+  async function fund() {
+    if (!valid || !arbiterOk) return
 
     const address = payeeAddress.trim()
+    const arb: ShareRecipient = {
+      name: arbiter.name.trim(),
+      email: arbiter.email.trim(),
+      role: "Arbiter",
+      address: arbiter.address.trim(),
+    }
     try {
       const { dealId, txHash } = await createDeal({
         title: title.trim(),
         payee: { name: payeeName.trim() || undefined, address },
+        arbiter: { name: arb.name, address: arb.address! },
+        reviewPeriod,
         milestones: milestones.map((m) => ({
           title: m.title.trim(),
           amount: Number(m.amount),
           rule: m.rule,
-          dueAt: m.rule === "schedule" && m.dueAt ? new Date(m.dueAt).toISOString() : undefined,
+          dueAt: m.rule === "schedule" ? new Date(m.dueAt).toISOString() : undefined,
+          deliverBy: m.rule === "approval" ? new Date(m.deliverBy).toISOString() : undefined,
         })),
         splits:
           splits.length > 0
@@ -169,7 +234,6 @@ export default function NewDealPage() {
                 bps: Math.round(Number(s.pct) * 100),
               }))
             : [],
-        earnYield: earnYield && YIELD_ENABLED,
       })
 
       toast.success("Deal created", {
@@ -177,6 +241,7 @@ export default function NewDealPage() {
         action: { label: "View on explorer", onClick: () => window.open(explorerTx(txHash), "_blank") },
       })
       const recipients: ShareRecipient[] = [
+        arb,
         ...(payeeEmail.trim()
           ? [{ name: payeeName.trim() || undefined, email: payeeEmail.trim(), role: "Payee" as const, address }]
           : []),
@@ -190,15 +255,24 @@ export default function NewDealPage() {
           })),
       ]
       saveShare(String(dealId), recipients)
-      router.push(`/deals/${String(dealId)}`)
+      setCreated({ dealId: String(dealId), arbiter: arb })
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       toast.error("Transaction failed", { description: msg.slice(0, 120) })
     }
   }
 
+  function onArbiterOpenChange(open: boolean) {
+    if (isPending) return // keep the dialog up while the wallet flow runs
+    if (!open && created) {
+      router.push(`/deals/${created.dealId}`)
+      return
+    }
+    setArbiterOpen(open)
+  }
+
   return (
-    <form onSubmit={submit} className="space-y-6">
+    <form onSubmit={openArbiter} className="space-y-6">
       <PageHeader
         title="New deal"
         description="Lock USDC, set the release rules, split the payout."
@@ -249,8 +323,32 @@ export default function NewDealPage() {
                 placeholder="0x…"
               />
             </div>
+            <div className="space-y-1.5">
+              <span className={label}>Review period</span>
+              <div className="flex flex-wrap gap-2">
+                {reviewOptions.map((o) => (
+                  <button
+                    key={o.seconds}
+                    type="button"
+                    onClick={() => setReviewPeriod(o.seconds)}
+                    className={cn(
+                      "rounded-md px-2.5 py-1.5 text-xs transition-colors",
+                      reviewPeriod === o.seconds
+                        ? "bg-foreground text-background"
+                        : "bg-foreground/5 text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                After the payee marks a milestone delivered, you have this long to release or dispute it.
+                If you do neither, the payee can claim it.
+              </p>
+            </div>
             <p className="text-xs text-muted-foreground">
-              Emails stay in this browser. After funding you get a ready-to-send email link.
+              Emails stay in this browser. After funding you get ready-to-send email links.
             </p>
           </section>
 
@@ -259,6 +357,7 @@ export default function NewDealPage() {
               <h2 className="font-medium">Vesting template</h2>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 Optional. Fill equal scheduled releases for team vesting or retainers.
+                Once the payee accepts, scheduled releases cannot be revoked.
               </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
@@ -341,85 +440,90 @@ export default function NewDealPage() {
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() =>
-                  setMilestones((prev) => [
-                    ...prev,
-                    { title: "", amount: "", rule: "approval", dueAt: "" },
-                  ])
-                }
+                onClick={() => setMilestones((prev) => [...prev, emptyMilestone()])}
                 disabled={milestones.length >= 20}
               >
                 <Icon icon={PlusSignIcon} size={14} /> Add
               </Button>
             </div>
 
-            {milestones.map((m, i) => (
-              <div key={i} className="space-y-3 rounded-xl border border-border bg-foreground/2 p-4">
-                <div className="flex gap-3">
-                  <Input
-                    value={m.title}
-                    onChange={(e) => updateMilestone(i, { title: e.target.value })}
-                    placeholder={`Milestone ${i + 1}`}
-                    maxLength={80}
-                  />
-                  <div className="relative w-36 shrink-0">
-                    <span className="absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+            {milestones.map((m, i) => {
+              const dateField = m.rule === "schedule" ? "dueAt" : "deliverBy"
+              const dateValue = m[dateField]
+              return (
+                <div key={i} className="space-y-3 rounded-xl border border-border bg-foreground/2 p-4">
+                  <div className="flex gap-3">
                     <Input
-                      value={m.amount}
-                      inputMode="decimal"
-                      onChange={(e) => updateMilestone(i, { amount: e.target.value.replace(/[^0-9.]/g, "") })}
-                      placeholder="0"
-                      className="tabular pl-6"
+                      value={m.title}
+                      onChange={(e) => updateMilestone(i, { title: e.target.value })}
+                      placeholder={`Milestone ${i + 1}`}
+                      maxLength={80}
                     />
-                  </div>
-                  {milestones.length > 1 && (
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      aria-label="Remove milestone"
-                      onClick={() => setMilestones((prev) => prev.filter((_, idx) => idx !== i))}
-                    >
-                      <Icon icon={Cancel01Icon} size={14} />
-                    </Button>
-                  )}
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {rules.map((r) => (
-                    <button
-                      key={r.value}
-                      type="button"
-                      title={r.hint}
-                      onClick={() => updateMilestone(i, { rule: r.value })}
-                      className={cn(
-                        "rounded-md px-2.5 py-1 text-xs transition-colors",
-                        m.rule === r.value
-                          ? "bg-foreground text-background"
-                          : "bg-foreground/5 text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      {r.label}
-                    </button>
-                  ))}
-                  {m.rule === "schedule" && (
-                    <div className="flex flex-col gap-1">
+                    <div className="relative w-36 shrink-0">
+                      <span className="absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground">$</span>
                       <Input
-                        type="datetime-local"
-                        value={m.dueAt}
-                        onChange={(e) => updateMilestone(i, { dueAt: e.target.value })}
-                        aria-invalid={!!m.dueAt && !scheduleOk(m.dueAt)}
-                        className="h-8 w-52"
+                        value={m.amount}
+                        inputMode="decimal"
+                        onChange={(e) => updateMilestone(i, { amount: e.target.value.replace(/[^0-9.]/g, "") })}
+                        placeholder="0"
+                        className="tabular pl-6"
                       />
-                      {m.dueAt && !scheduleOk(m.dueAt) && (
+                    </div>
+                    {milestones.length > 1 && (
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Remove milestone"
+                        onClick={() => setMilestones((prev) => prev.filter((_, idx) => idx !== i))}
+                      >
+                        <Icon icon={Cancel01Icon} size={14} />
+                      </Button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {rules.map((r) => (
+                      <button
+                        key={r.value}
+                        type="button"
+                        title={r.hint}
+                        onClick={() => updateMilestone(i, { rule: r.value })}
+                        className={cn(
+                          "rounded-md px-2.5 py-1 text-xs transition-colors",
+                          m.rule === r.value
+                            ? "bg-foreground text-background"
+                            : "bg-foreground/5 text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                    <div className="flex flex-col gap-1">
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                        {m.rule === "schedule" ? "Releases" : "Deliver by"}
+                        <Input
+                          type="datetime-local"
+                          value={dateValue}
+                          onChange={(e) => updateMilestone(i, { [dateField]: e.target.value })}
+                          aria-invalid={!!dateValue && !dateOk(dateValue)}
+                          className="h-8 w-52"
+                        />
+                      </label>
+                      {dateValue && !dateOk(dateValue) && (
                         <p className="text-xs text-destructive">
                           Must be at least 5 min from now to confirm onchain
                         </p>
                       )}
                     </div>
+                  </div>
+                  {m.rule === "approval" && (
+                    <p className="text-xs text-muted-foreground">
+                      If nothing is delivered by this date, you can take this milestone back.
+                    </p>
                   )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </section>
 
           <section className="glass space-y-4 rounded-2xl p-6">
@@ -500,34 +604,10 @@ export default function NewDealPage() {
           <h2 className="font-medium">Summary</h2>
           <dl className="space-y-3 text-sm">
             <Row label="Milestones" value={String(milestones.length)} />
+            <Row label="Review period" value={reviewOptions.find((o) => o.seconds === reviewPeriod)?.label ?? ""} />
             <Row label="Escrow total" value={`$${usdc(total, 2)}`} />
             <Row label={`Protocol fee (${protocolFeeBps / 100}%)`} value={`$${usdc(fee, 2)}`} />
           </dl>
-          {YIELD_ENABLED && (
-            <div className="flex items-center justify-between rounded-xl border border-border px-4 py-3 text-sm">
-              <div>
-                <p className="font-medium">Earn yield</p>
-                <p className="text-xs text-muted-foreground">Auto-deposit into vault</p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={earnYield}
-                onClick={() => setEarnYield((v) => !v)}
-                className={cn(
-                  "relative h-5 w-9 cursor-pointer rounded-full transition-colors",
-                  earnYield ? "bg-foreground" : "bg-foreground/20",
-                )}
-              >
-                <span
-                  className={cn(
-                    "absolute top-0.5 left-0.5 size-4 rounded-full bg-background transition-transform",
-                    earnYield ? "translate-x-4" : "translate-x-0",
-                  )}
-                />
-              </button>
-            </div>
-          )}
           <div className="border-t border-border pt-4">
             <div className="flex items-baseline justify-between">
               <span className="text-sm text-muted-foreground">You deposit</span>
@@ -535,11 +615,119 @@ export default function NewDealPage() {
             </div>
             <p className="mt-1 text-xs text-muted-foreground">USDC · settled on Arc</p>
           </div>
-          <Button type="submit" size="lg" className="w-full" disabled={!valid || isPending}>
-            <FundLabel step={step} isPending={isPending} />
+          <Button type="submit" size="lg" className="w-full" disabled={!valid}>
+            Continue
           </Button>
+          <p className="text-xs text-muted-foreground">Next: choose a third-party arbiter.</p>
         </aside>
       </div>
+
+      <Dialog open={arbiterOpen} onOpenChange={onArbiterOpenChange}>
+        <DialogContent showCloseButton={!isPending}>
+          {created ? (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Icon icon={CheckmarkCircle02Icon} size={18} /> Deal #{created.dealId} funded
+                </DialogTitle>
+                <DialogDescription>
+                  Last step: let {created.arbiter.name} know they are the arbiter. The email opens in your
+                  mail app with the deal link filled in.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => router.push(`/deals/${created.dealId}`)}>
+                  Go to deal
+                </Button>
+                <Button asChild>
+                  <a href={mailtoFor(created.arbiter, created.dealId, title.trim())}>
+                    <Icon icon={Mail01Icon} size={14} /> Email the arbiter
+                  </a>
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>Choose an arbiter</DialogTitle>
+                <DialogDescription>
+                  A neutral third party who settles disputes. If you dispute a delivery, they decide
+                  whether it goes to the payee or back to you. They never hold funds.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <label className={label} htmlFor="arbiter-name">Name</label>
+                  <Input
+                    id="arbiter-name"
+                    value={arbiter.name}
+                    onChange={(e) => setArbiter((a) => ({ ...a, name: e.target.value }))}
+                    placeholder="Full name"
+                    disabled={isPending}
+                    autoFocus
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className={label} htmlFor="arbiter-email">Email</label>
+                  <Input
+                    id="arbiter-email"
+                    type="email"
+                    value={arbiter.email}
+                    onChange={(e) => setArbiter((a) => ({ ...a, email: e.target.value }))}
+                    placeholder="name@example.com"
+                    disabled={isPending}
+                    aria-invalid={!!arbiter.email.trim() && !isEmail(arbiter.email.trim())}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className={label} htmlFor="arbiter-address">Wallet</label>
+                  <Input
+                    id="arbiter-address"
+                    value={arbiter.address}
+                    onChange={(e) => setArbiter((a) => ({ ...a, address: e.target.value }))}
+                    placeholder="0x…"
+                    disabled={isPending}
+                    aria-invalid={
+                      (!!arbiter.address.trim() && !isAddress(arbiter.address.trim())) ||
+                      arbiterConflict ||
+                      arbiterSplitConflict
+                    }
+                  />
+                  {arbiterConflict && (
+                    <p className="text-xs text-destructive">The arbiter can&apos;t be you or the payee.</p>
+                  )}
+                  {arbiterSplitConflict && (
+                    <p className="text-xs text-destructive">The arbiter can&apos;t be a payout recipient.</p>
+                  )}
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isPending}
+                  onClick={() => setArbiterOpen(false)}
+                >
+                  Back
+                </Button>
+                <Button type="button" disabled={!arbiterOk || isPending} onClick={() => void fund()}>
+                  <FundLabel step={step} isPending={isPending} />
+                </Button>
+              </DialogFooter>
+              {txHash && isPending && (
+                <a
+                  href={explorerTx(txHash)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-center text-xs text-muted-foreground underline-offset-2 hover:underline"
+                >
+                  View transaction
+                </a>
+              )}
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </form>
   )
 }

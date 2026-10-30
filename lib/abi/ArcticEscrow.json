@@ -8,11 +8,6 @@
         "internalType": "address"
       },
       {
-        "name": "_vault",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
         "name": "_treasury",
         "type": "address",
         "internalType": "address"
@@ -23,11 +18,135 @@
         "internalType": "uint16"
       },
       {
-        "name": "_yieldFeeBps",
+        "name": "_owner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "MAX_FEE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
         "type": "uint16",
         "internalType": "uint16"
       }
     ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_HORIZON",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_MILESTONES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_PAGE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_REVIEW_PERIOD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_SPLITS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_TITLE_BYTES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_REVIEW_PERIOD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "acceptDeal",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "acceptOwnership",
+    "inputs": [],
+    "outputs": [],
     "stateMutability": "nonpayable"
   },
   {
@@ -36,6 +155,11 @@
     "inputs": [
       {
         "name": "payee",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "arbiter",
         "type": "address",
         "internalType": "address"
       },
@@ -66,8 +190,13 @@
           },
           {
             "name": "releaseTime",
-            "type": "uint128",
-            "internalType": "uint128"
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "deliverBy",
+            "type": "uint64",
+            "internalType": "uint64"
           }
         ]
       },
@@ -89,9 +218,9 @@
         ]
       },
       {
-        "name": "earnYield",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "reviewPeriod",
+        "type": "uint32",
+        "internalType": "uint32"
       }
     ],
     "outputs": [
@@ -118,12 +247,60 @@
   },
   {
     "type": "function",
+    "name": "dealCountByPayee",
+    "inputs": [
+      {
+        "name": "payee",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "dealCountByPayer",
+    "inputs": [
+      {
+        "name": "payer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "dealsByPayee",
     "inputs": [
       {
         "name": "payee",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "offset",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "limit",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [
@@ -143,6 +320,16 @@
         "name": "payer",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "offset",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "limit",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [
@@ -153,6 +340,24 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "disputeMilestone",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -194,6 +399,11 @@
             "internalType": "address"
           },
           {
+            "name": "arbiter",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
             "name": "total",
             "type": "uint128",
             "internalType": "uint128"
@@ -204,19 +414,9 @@
             "internalType": "uint128"
           },
           {
-            "name": "principalRemaining",
+            "name": "refunded",
             "type": "uint128",
             "internalType": "uint128"
-          },
-          {
-            "name": "shares",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "earnYield",
-            "type": "bool",
-            "internalType": "bool"
           },
           {
             "name": "createdAt",
@@ -224,12 +424,17 @@
             "internalType": "uint64"
           },
           {
-            "name": "feeBps",
-            "type": "uint16",
-            "internalType": "uint16"
+            "name": "acceptedAt",
+            "type": "uint64",
+            "internalType": "uint64"
           },
           {
-            "name": "yieldFeeBps",
+            "name": "reviewPeriod",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "feeBps",
             "type": "uint16",
             "internalType": "uint16"
           },
@@ -264,7 +469,7 @@
   },
   {
     "type": "function",
-    "name": "getMilestoneTitle",
+    "name": "getMilestoneTitleHash",
     "inputs": [
       {
         "name": "dealId",
@@ -309,8 +514,23 @@
           },
           {
             "name": "releaseTime",
-            "type": "uint128",
-            "internalType": "uint128"
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "deliverBy",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "deliveredAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "settledAt",
+            "type": "uint64",
+            "internalType": "uint64"
           },
           {
             "name": "rule",
@@ -321,11 +541,6 @@
             "name": "state",
             "type": "uint8",
             "internalType": "enum ArcticEscrow.MilestoneState"
-          },
-          {
-            "name": "releasedAt",
-            "type": "uint128",
-            "internalType": "uint128"
           }
         ]
       }
@@ -365,6 +580,19 @@
   },
   {
     "type": "function",
+    "name": "liabilities",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "markDelivered",
     "inputs": [
       {
@@ -380,6 +608,25 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "owed",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -416,19 +663,13 @@
   },
   {
     "type": "function",
-    "name": "pendingYield",
-    "inputs": [
-      {
-        "name": "dealId",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
+    "name": "pendingOwner",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -478,6 +719,52 @@
   },
   {
     "type": "function",
+    "name": "rescue",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "resolveDispute",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "releaseToPayee",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setFeeBps",
     "inputs": [
       {
@@ -497,19 +784,6 @@
         "name": "t",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setYieldFeeBps",
-    "inputs": [
-      {
-        "name": "bps",
-        "type": "uint16",
-        "internalType": "uint16"
       }
     ],
     "outputs": [],
@@ -563,42 +837,23 @@
   },
   {
     "type": "function",
-    "name": "vault",
+    "name": "withdraw",
     "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract IERC4626"
-      }
-    ],
-    "stateMutability": "view"
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
-    "type": "function",
-    "name": "vaultAddress",
-    "inputs": [],
-    "outputs": [
+    "type": "event",
+    "name": "DealAccepted",
+    "inputs": [
       {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
+        "name": "dealId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "yieldFeeBps",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint16",
-        "internalType": "uint16"
-      }
-    ],
-    "stateMutability": "view"
+    "anonymous": false
   },
   {
     "type": "event",
@@ -635,7 +890,38 @@
         "internalType": "uint128"
       },
       {
-        "name": "earnYield",
+        "name": "arbiter",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "reviewPeriod",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DisputeResolved",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "releasedToPayee",
         "type": "bool",
         "indexed": false,
         "internalType": "bool"
@@ -659,6 +945,25 @@
   {
     "type": "event",
     "name": "MilestoneDelivered",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MilestoneDisputed",
     "inputs": [
       {
         "name": "dealId",
@@ -733,6 +1038,25 @@
   },
   {
     "type": "event",
+    "name": "OwnershipTransferStarted",
+    "inputs": [
+      {
+        "name": "previousOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "OwnershipTransferred",
     "inputs": [
       {
@@ -765,20 +1089,8 @@
   },
   {
     "type": "event",
-    "name": "SplitFailed",
+    "name": "PaymentDeferred",
     "inputs": [
-      {
-        "name": "dealId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
       {
         "name": "recipient",
         "type": "address",
@@ -787,9 +1099,34 @@
       },
       {
         "name": "amount",
-        "type": "uint128",
+        "type": "uint256",
         "indexed": false,
-        "internalType": "uint128"
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Rescued",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -853,53 +1190,33 @@
   },
   {
     "type": "event",
-    "name": "YieldFeeBpsUpdated",
+    "name": "Withdrawn",
     "inputs": [
       {
-        "name": "bps",
-        "type": "uint16",
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
         "indexed": false,
-        "internalType": "uint16"
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
   },
   {
-    "type": "event",
-    "name": "YieldHarvested",
+    "type": "error",
+    "name": "AlreadyAccepted",
     "inputs": [
       {
         "name": "dealId",
         "type": "uint256",
-        "indexed": true,
         "internalType": "uint256"
-      },
-      {
-        "name": "index",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "toPayer",
-        "type": "uint128",
-        "indexed": false,
-        "internalType": "uint128"
-      },
-      {
-        "name": "fee",
-        "type": "uint128",
-        "indexed": false,
-        "internalType": "uint128"
-      },
-      {
-        "name": "shortfall",
-        "type": "uint128",
-        "indexed": false,
-        "internalType": "uint128"
       }
-    ],
-    "anonymous": false
+    ]
   },
   {
     "type": "error",
@@ -935,8 +1252,34 @@
   },
   {
     "type": "error",
+    "name": "FundingMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InsufficientExcess",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InvalidAmount",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidArbiter",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidDeadline",
+    "inputs": [
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -953,16 +1296,16 @@
     "name": "InvalidReleaseTime",
     "inputs": [
       {
-        "name": "dealId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
         "name": "index",
         "type": "uint256",
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidReviewPeriod",
+    "inputs": []
   },
   {
     "type": "error",
@@ -976,8 +1319,88 @@
   },
   {
     "type": "error",
-    "name": "NoVault",
+    "name": "MilestoneNotFound",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotAContract",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAccepted",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotArbiter",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotDeliverable",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotDisputable",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotDisputed",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -988,6 +1411,22 @@
     "type": "error",
     "name": "NotPayer",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotRefundable",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -1004,6 +1443,11 @@
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "NothingToWithdraw",
+    "inputs": []
   },
   {
     "type": "error",
@@ -1050,7 +1494,7 @@
   },
   {
     "type": "error",
-    "name": "VaultAssetMismatch",
+    "name": "Unauthorized",
     "inputs": []
   },
   {

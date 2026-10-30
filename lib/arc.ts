@@ -24,16 +24,6 @@ export const USDC_ADDRESS =
 /** USDC decimals on Arc (ERC-20 view = 6). */
 export const USDC_DECIMALS = 6
 
-/**
- * ERC-4626 vault address for yield. Zero / undefined = yield disabled.
- * No Morpho USDC vault exists on Arc mainnet today; set this when one is deployed.
- */
-export const VAULT_ADDRESS =
-  (process.env.NEXT_PUBLIC_VAULT_ADDRESS as `0x${string}` | undefined) ?? undefined
-
-/** True when a vault is configured for yield accrual. */
-export const YIELD_ENABLED = Boolean(VAULT_ADDRESS && VAULT_ADDRESS !== '0x0000000000000000000000000000000000000000')
-
 /** Arc mainnet explorer root. */
 export const EXPLORER_URL = CHAIN_ID === 5042
   ? 'https://explorer.arc.io'
