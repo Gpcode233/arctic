@@ -1,13 +1,21 @@
 {
-  "contractAddress": "0x766b425d86deae6363b41848a410dd1d7fee0035",
-  "network": "ARC-TESTNET",
+  "contractAddress": "0xf31b5d5375f707f689ada9dfd92fb50e7a4d2fd6",
+  "network": "ARC",
   "deployerWalletId": "external-eoa",
   "contract_code_path": "/home/user/app/contracts/ArcticEscrow.sol",
   "contract_compiled_code_path": "contracts/out/ArcticEscrow.sol/ArcticEscrow.json",
   "contract_network_and_links": {
-    "Arc Testnet": "https://explorer.testnet.arc.io/address/0x766b425d86deae6363b41848a410dd1d7fee0035"
+    "Arc Testnet": "https://explorer.testnet.arc.io/address/0x766b425d86deae6363b41848a410dd1d7fee0035",
+    "Arc Mainnet": "https://explorer.arc.io/address/0xf31b5d5375f707f689ada9dfd92fb50e7a4d2fd6"
   },
   "contract_deployments": [
+    {
+      "chain": "Arc Mainnet",
+      "address": "0xf31b5d5375f707f689ada9dfd92fb50e7a4d2fd6",
+      "explorerUrl": "https://explorer.arc.io/address/0xf31b5d5375f707f689ada9dfd92fb50e7a4d2fd6",
+      "txHash": "0x0e8cb75e287b17046da2a7af84932144c05c96a8bc93bc747f970e0859196dad",
+      "deployedAt": "2026-10-30T16:30:35.113Z"
+    },
     {
       "chain": "Arc Testnet",
       "address": "0x766b425d86deae6363b41848a410dd1d7fee0035",
