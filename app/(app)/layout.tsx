@@ -1,4 +1,5 @@
 import { AppBreadcrumb } from "@/components/arctic/app-breadcrumb"
+import { NetworkTabs } from "@/components/arctic/network-tabs"
 import { NotificationBell } from "@/components/arctic/notification-bell"
 import { AppSidebar } from "@/components/app-sidebar"
 import { Separator } from "@/components/ui/separator"
@@ -30,6 +31,7 @@ export default function AppLayout({
               <AppBreadcrumb />
             </div>
             <div className="flex items-center gap-2 pr-4">
+              <NetworkTabs />
               <NotificationBell />
             </div>
           </header>

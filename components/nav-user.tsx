@@ -20,17 +20,21 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
-import { CHAIN_ID } from "@/lib/arc"
 import { useProfile } from "@/lib/profile-store"
-
-const networkLabel = CHAIN_ID === 5042 ? "Arc mainnet" : "Arc testnet"
 
 export function NavUser() {
   const { address, isConnected, chain } = useAccount()
   const { disconnect } = useDisconnect()
   const { profile } = useProfile()
 
-  const wrongNetwork = isConnected && chain?.id !== CHAIN_ID
+  const networkLabel =
+    chain?.id === 5042
+      ? "Arc mainnet"
+      : chain?.id === 5042002
+        ? "Arc testnet"
+        : "Select network"
+  const wrongNetwork =
+    isConnected && chain?.id !== 5042 && chain?.id !== 5042002
 
   if (!isConnected) {
     return (
